@@ -1,13 +1,138 @@
 """CLI 命令定义：config / fetch / generate / memory / publish / interactive"""
 
 import json
+import importlib.util
+import sys
 from datetime import datetime
 from pathlib import Path
 
 import click
 
 from .config import load_config, save_config, set_nested, get_nested, find_topic
+from .pipeline import article_to_dict, build_fact_pack, build_quality_report, collect_articles
 from .utils import get_output_dir, logger
+
+
+REQUIRED_PACKAGES = [
+    "click",
+    "requests",
+    "feedparser",
+    "bs4",
+    "lxml",
+    "readability",
+    "openai",
+]
+
+
+def _ok(label: str, detail: str = "") -> None:
+    click.echo(f"[OK] {label}{': ' + detail if detail else ''}")
+
+
+def _warn(label: str, detail: str = "") -> None:
+    click.echo(f"[WARN] {label}{': ' + detail if detail else ''}")
+
+
+def _fail(label: str, detail: str = "") -> None:
+    click.echo(f"[FAIL] {label}{': ' + detail if detail else ''}")
+
+
+@click.command("doctor")
+@click.option("--config", "config_path", default=None, help="配置文件路径")
+def doctor_cmd(config_path):
+    """检查本地环境、依赖和 NewsWeaver 配置"""
+    click.echo("NewsWeaver doctor")
+    click.echo("-" * 40)
+
+    if sys.version_info >= (3, 10):
+        _ok("Python", sys.version.split()[0])
+    else:
+        _fail("Python", "需要 Python >= 3.10")
+
+    missing = []
+    for package in REQUIRED_PACKAGES:
+        if importlib.util.find_spec(package) is None:
+            missing.append(package)
+    if missing:
+        _fail("依赖", "缺少 " + ", ".join(missing))
+        click.echo("      运行: pip install -e .")
+    else:
+        _ok("依赖", "全部可导入")
+
+    config = load_config(config_path)
+    api_key = config.get("llm", {}).get("api_key", "")
+    if api_key and api_key != "sk-your-api-key-here":
+        _ok("LLM API Key", "已配置")
+    else:
+        _warn("LLM API Key", "尚未配置，generate 会失败")
+
+    model = config.get("llm", {}).get("model", "")
+    base_url = config.get("llm", {}).get("base_url", "")
+    _ok("模型配置", f"{model} @ {base_url}")
+
+    topics = config.get("topics", [])
+    if topics:
+        _ok("主题", f"{len(topics)} 个")
+    else:
+        _warn("主题", "还没有主题，运行 newsweaver topic add")
+
+    out_dir = get_output_dir()
+    try:
+        probe = out_dir / ".doctor_write_test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        _ok("输出目录", str(out_dir))
+    except OSError as exc:
+        _fail("输出目录", str(exc))
+
+
+@click.command("preview")
+@click.option("--topic", "-t", required=True, help="主题名称")
+@click.option("--limit", "-l", default=None, type=int, help="采集数量")
+@click.option("--save", is_flag=True, help="保存预览 JSON 到 output/preview")
+@click.option("--config", "config_path", default=None, help="配置文件路径")
+def preview_cmd(topic, limit, save, config_path):
+    """预览采集结果、相关性和基础质量，不调用 LLM"""
+    config = load_config(config_path)
+    topic_obj = find_topic(config, topic)
+    if not topic_obj:
+        click.echo(f'错误：主题 "{topic}" 不存在', err=True)
+        raise SystemExit(1)
+
+    click.echo(f'>>> 正在预览 "{topic}" 的采集结果...')
+    articles = collect_articles(config, topic_obj, limit or config["search"]["default_limit"])
+    facts = build_fact_pack(topic, articles)
+    quality = build_quality_report(topic, articles, facts)
+
+    click.echo(
+        f">>> 质量评分: {quality['score']}/100 | "
+        f"{quality['article_count']} 篇 | {quality['source_count']} 个来源"
+    )
+    for warning in quality.get("warnings", []):
+        click.echo(f"[WARN] {warning}")
+
+    for i, article in enumerate(articles, 1):
+        data = article_to_dict(article, topic_obj.get("keywords", []))
+        click.echo(
+            f"{i}. [{data['source']}] {data['title']} "
+            f"(score={data['relevance_score']})"
+        )
+        click.echo(f"   {data['url']}")
+
+    if save:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        preview_dir = get_output_dir() / "preview"
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        path = preview_dir / f"{topic}_{ts}.json"
+        payload = {
+            "topic": topic,
+            "generated_at": datetime.now().isoformat(),
+            "quality": quality,
+            "facts": facts,
+            "articles": [article_to_dict(a, topic_obj.get("keywords", [])) for a in articles],
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        click.echo(f">>> 预览已保存至 {path}")
 
 
 # ───────────────── config 命令组 ─────────────────
@@ -239,6 +364,19 @@ def publish_cmd(topic, platform, config_path):
 
     click.echo(f"[Mock] 发布到 {platform}，内容长度 {len(content)} 字符")
     click.echo(f"✓ 发布模拟成功，返回 ID: {result['post_id']}")
+
+
+# ───────────────── web 命令 ─────────────────
+
+@click.command("web")
+@click.option("--host", default="127.0.0.1", show_default=True, help="监听地址")
+@click.option("--port", default=8765, show_default=True, type=int, help="监听端口")
+@click.option("--open/--no-open", "open_browser", default=True, show_default=True, help="自动打开浏览器")
+def web_cmd(host, port, open_browser):
+    """启动面向用户的本地 Web 前端"""
+    from .webapp import serve
+
+    serve(host=host, port=port, open_browser=open_browser)
 
 
 # ───────────────── interactive 命令 ─────────────────

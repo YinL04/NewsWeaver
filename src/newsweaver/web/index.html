@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NewsWeaver Control Desk</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-frame">
+      <aside class="sidebar" aria-label="NewsWeaver navigation">
+        <div class="brand">
+          <div class="brand-mark">NW</div>
+          <div>
+            <strong>NewsWeaver</strong>
+            <span>Control Desk</span>
+          </div>
+        </div>
+
+        <nav class="step-nav">
+          <div class="step-item" id="stepModel">
+            <span class="step-dot">01</span>
+            <div>
+              <strong>连接模型</strong>
+              <small id="modelHint">等待检查</small>
+            </div>
+          </div>
+          <div class="step-item" id="stepTopic">
+            <span class="step-dot">02</span>
+            <div>
+              <strong>选择方向</strong>
+              <small id="topicHint">等待检查</small>
+            </div>
+          </div>
+          <div class="step-item" id="stepRun">
+            <span class="step-dot">03</span>
+            <div>
+              <strong>生成报告</strong>
+              <small id="runHint">等待检查</small>
+            </div>
+          </div>
+        </nav>
+
+        <div class="sidebar-note">
+          <strong>工作流</strong>
+          <p>先体检素材，再生成报告。每次生成都会保存事实包和质量评分。</p>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <p class="kicker">AI News Intelligence</p>
+            <h1>可信资讯报告生产台</h1>
+          </div>
+          <div class="topbar-actions">
+            <div id="statusPill" class="status-pill">正在检查</div>
+            <button id="nextActionBtn" class="primary-action">开始</button>
+          </div>
+        </header>
+
+        <section class="command-strip">
+          <div>
+            <p class="kicker">下一步</p>
+            <h2 id="nextTitle">准备中</h2>
+            <p id="nextDescription">正在读取本地配置。</p>
+          </div>
+          <div class="metric-row">
+            <div class="metric">
+              <span>主题</span>
+              <strong id="topicMetric">0</strong>
+            </div>
+            <div class="metric">
+              <span>报告</span>
+              <strong id="reportMetric">0</strong>
+            </div>
+            <div class="metric">
+              <span>模型</span>
+              <strong id="modelMetric">未连接</strong>
+            </div>
+          </div>
+        </section>
+
+        <section class="grid two-col">
+          <section class="panel" id="modelSection">
+            <div class="panel-head">
+              <div>
+                <p class="kicker">Model</p>
+                <h2>模型连接</h2>
+              </div>
+              <span class="panel-tag" id="modelTag">未连接</span>
+            </div>
+            <form id="configForm" class="model-form">
+              <label class="field full">
+                <span>API Key</span>
+                <input name="api_key" type="password" placeholder="粘贴你的 API Key" autocomplete="off" />
+              </label>
+              <details class="advanced full">
+                <summary>高级设置</summary>
+                <div class="advanced-grid">
+                  <label class="field">
+                    <span>Base URL</span>
+                    <input name="base_url" placeholder="https://api.openai.com/v1" />
+                  </label>
+                  <label class="field">
+                    <span>模型</span>
+                    <input name="model" placeholder="gpt-4o-mini" />
+                  </label>
+                  <label class="field">
+                    <span>采集数量</span>
+                    <input name="default_limit" type="number" min="1" max="30" />
+                  </label>
+                  <label class="field">
+                    <span>时间范围</span>
+                    <input name="days_back" type="number" min="1" max="30" />
+                  </label>
+                </div>
+              </details>
+              <button type="submit" class="secondary-action">保存设置</button>
+            </form>
+          </section>
+
+          <section class="panel" id="topicSection">
+            <div class="panel-head">
+              <div>
+                <p class="kicker">Topics</p>
+                <h2>关注方向</h2>
+              </div>
+              <span class="panel-tag">模板优先</span>
+            </div>
+            <div id="presetGrid" class="preset-grid"></div>
+            <form id="topicForm" class="topic-form">
+              <label class="field">
+                <span>主题名称</span>
+                <input name="name" placeholder="AI 大模型" required />
+              </label>
+              <label class="field span-2">
+                <span>关键词</span>
+                <input name="keywords" placeholder="大模型, GPT, OpenAI" required />
+              </label>
+              <label class="field">
+                <span>排除词</span>
+                <input name="exclude_words" placeholder="教程, 招聘" />
+              </label>
+              <input name="sources" type="hidden" value="" />
+              <button type="submit" class="secondary-action">创建主题</button>
+            </form>
+          </section>
+        </section>
+
+        <section class="panel operations" id="runSection">
+          <div class="panel-head run-head">
+            <div>
+              <p class="kicker">Operations</p>
+              <h2>今日报告流水线</h2>
+            </div>
+            <div class="run-controls">
+              <select id="topicSelect" aria-label="选择主题"></select>
+              <button id="previewBtn" class="secondary-action">体检素材</button>
+              <button id="generateBtn" class="primary-action">生成报告</button>
+            </div>
+          </div>
+
+          <div class="topic-toolbar">
+            <div>
+              <span class="muted-label">已有主题</span>
+              <div id="topicChips" class="chips"></div>
+            </div>
+            <button id="deleteTopicBtn" class="danger-action">删除当前主题</button>
+          </div>
+
+          <div id="qualityBox" class="quality-box empty-state">
+            还没有体检素材。点击“体检素材”查看今天的证据基础。
+          </div>
+
+          <div class="results">
+            <section class="result-panel">
+              <div class="result-head">
+                <h3>采集素材</h3>
+                <span id="articleCount">0 篇</span>
+              </div>
+              <div id="articleList" class="article-list empty-state">暂无素材</div>
+            </section>
+
+            <section class="result-panel report-panel">
+              <div class="result-head">
+                <h3>报告阅读</h3>
+                <div class="report-picker">
+                  <select id="reportSelect" aria-label="选择报告"></select>
+                  <button id="loadReportBtn" class="secondary-action compact">打开</button>
+                </div>
+              </div>
+              <article id="reportView" class="report-view empty-state">生成后会显示在这里。</article>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

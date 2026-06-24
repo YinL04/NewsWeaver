@@ -33,12 +33,25 @@ def main(ctx, verbose, config_path):
 
 # 延迟导入子命令模块，避免循环依赖
 from .topic import topic_group  # noqa: E402
-from .commands import config_group, fetch_cmd, generate_cmd, memory_group, publish_cmd, interactive_cmd  # noqa: E402
+from .commands import (  # noqa: E402
+    config_group,
+    doctor_cmd,
+    fetch_cmd,
+    generate_cmd,
+    interactive_cmd,
+    memory_group,
+    preview_cmd,
+    publish_cmd,
+    web_cmd,
+)
 
 main.add_command(topic_group)
 main.add_command(config_group)
+main.add_command(doctor_cmd)
+main.add_command(preview_cmd)
 main.add_command(fetch_cmd)
 main.add_command(generate_cmd)
 main.add_command(memory_group)
 main.add_command(publish_cmd)
+main.add_command(web_cmd)
 main.add_command(interactive_cmd)

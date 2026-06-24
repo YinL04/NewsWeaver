@@ -7,13 +7,20 @@ from pathlib import Path
 
 import click
 
-from .config import find_topic
-from .fetcher.rss import RssFetcher
-from .fetcher.bing import BingFetcher
 from .extractor import extract_article
 from .llm.client import LLMClient
 from .llm.prompts import build_user_prompt, build_memory_prompt, SYSTEM_PROMPT
 from .memory.store import MemoryStore
+from .pipeline import (
+    article_to_dict,
+    build_event_clusters,
+    build_fact_pack,
+    build_quality_report,
+    collect_articles,
+    dedupe_articles,
+    rank_articles,
+    write_artifacts,
+)
 from .utils import get_output_dir, logger
 
 
@@ -33,6 +40,15 @@ def run_generate(config: dict, topic_obj: dict, model: str, limit: int) -> Path:
         if not a.full_text or a.full_text == a.summary:
             a.full_text = extract_article(a.url) or a.summary
 
+    articles = rank_articles(dedupe_articles(articles), topic_obj.get("keywords", []))[:limit]
+    fact_pack = build_fact_pack(topic_name, articles)
+    quality_report = build_quality_report(topic_name, articles, fact_pack)
+    event_clusters = build_event_clusters(articles)
+    click.echo(
+        f">>> 质量评分: {quality_report['score']}/100 "
+        f"({quality_report['article_count']} 篇, {quality_report['source_count']} 个来源)"
+    )
+
     # ── 2. 读取记忆 ──
     click.echo(">>> 读取记忆...")
     memory_store = MemoryStore(topic_name)
@@ -49,23 +65,15 @@ def run_generate(config: dict, topic_obj: dict, model: str, limit: int) -> Path:
         model=model,
     )
 
-    articles_dicts = [
-        {
-            "title": a.title,
-            "url": a.url,
-            "source": a.source,
-            "published_at": a.published_at,
-            "summary": a.summary,
-            "full_text": a.full_text,
-        }
-        for a in articles
-    ]
+    articles_dicts = [article_to_dict(a, topic_obj.get("keywords", [])) for a in articles]
 
     user_prompt = build_user_prompt(
         topic_name=topic_name,
         articles=articles_dicts,
         recent_memory=recent[-7:] if recent else None,
         long_term_memory=long_term[-4:] if long_term else None,
+        fact_pack=fact_pack,
+        quality_report=quality_report,
     )
 
     report = llm.generate(SYSTEM_PROMPT, user_prompt, model=model)
@@ -75,7 +83,10 @@ def run_generate(config: dict, topic_obj: dict, model: str, limit: int) -> Path:
     out_dir = get_output_dir()
     out_file = out_dir / f"{topic_name}_{today}.md"
     out_file.write_text(report, encoding="utf-8")
+    artifact_paths = write_artifacts(out_file, fact_pack, quality_report, event_clusters)
     click.echo(">>> 报道生成完成")
+    click.echo(f">>> 事实包: {artifact_paths['facts']}")
+    click.echo(f">>> 质量报告: {artifact_paths['quality']}")
     click.echo(f"\n{'='*50}")
     click.echo(report[:1000] + ("..." if len(report) > 1000 else ""))
     click.echo(f"{'='*50}\n")
@@ -89,46 +100,7 @@ def run_generate(config: dict, topic_obj: dict, model: str, limit: int) -> Path:
 
 def _fetch_articles(config: dict, topic_obj: dict, limit: int) -> list:
     """采集新闻文章"""
-    days = config["search"]["days_back"]
-    articles = []
-
-    rss_sources = topic_obj.get("sources", [])
-    if not rss_sources:
-        rss_sources = ["rss"]
-
-    # 默认 RSS 源
-    if "rss" in rss_sources:
-        rss = RssFetcher()
-        articles.extend(rss.fetch(
-            keywords=topic_obj["keywords"],
-            exclude_words=topic_obj.get("exclude_words", []),
-            limit=limit,
-            days_back=days,
-        ))
-
-    # 自定义 RSS 源
-    for src in rss_sources:
-        if src.startswith("rss:"):
-            url = src[4:]
-            rss = RssFetcher(feed_url=url)
-            articles.extend(rss.fetch(
-                keywords=topic_obj["keywords"],
-                exclude_words=topic_obj.get("exclude_words", []),
-                limit=limit,
-                days_back=days,
-            ))
-
-    # Bing News
-    bing_key = config["search"].get("bing_api_key", "")
-    if bing_key and "bing" in rss_sources:
-        bing = BingFetcher(api_key=bing_key)
-        articles.extend(bing.fetch(
-            keywords=topic_obj["keywords"],
-            exclude_words=topic_obj.get("exclude_words", []),
-            limit=limit,
-            days_back=days,
-        ))
-
+    articles = collect_articles(config, topic_obj, limit)
     click.echo(f">>> 找到 {len(articles)} 篇文章")
     return articles
 

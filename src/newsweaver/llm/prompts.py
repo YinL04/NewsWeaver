@@ -36,6 +36,8 @@ USER_PROMPT_TEMPLATE = """请根据以下素材，写一篇完整的自媒体风
 
 {articles_text}
 
+{evidence_section}
+
 {memory_section}
 
 ## 写作要求
@@ -46,6 +48,7 @@ USER_PROMPT_TEMPLATE = """请根据以下素材，写一篇完整的自媒体风
 4. **有导语**：用一句话抓住读者注意力
 5. **有节奏**：段落不要太长，重要观点加粗强调
 6. **有来源**：关键事实引用原文链接
+7. **受证据约束**：重要判断必须能回到“事实证据包”中的来源，不要补写没有来源支撑的具体数字、融资额、人物引语
 
 请严格按照以下结构输出：
 
@@ -82,6 +85,8 @@ def build_user_prompt(
     articles: list,
     recent_memory: list | None = None,
     long_term_memory: list | None = None,
+    fact_pack: dict | None = None,
+    quality_report: dict | None = None,
 ) -> str:
     """构造 User Prompt"""
     from datetime import datetime
@@ -95,6 +100,26 @@ def build_user_prompt(
         articles_text += f"- 时间: {a.get('published_at', '未知')}\n"
         articles_text += f"- 链接: {a['url']}\n"
         articles_text += f"- 正文: {text}\n\n"
+
+    evidence_section = ""
+    if fact_pack:
+        evidence_section += "## 事实证据包\n\n"
+        evidence_section += (
+            f"- 文章数: {fact_pack.get('article_count', 0)}\n"
+            f"- 来源数: {fact_pack.get('source_count', 0)}\n"
+        )
+        if quality_report:
+            evidence_section += f"- 质量评分: {quality_report.get('score', 0)}/100\n"
+            warnings = quality_report.get("warnings", [])
+            if warnings:
+                evidence_section += "- 风险提示: " + "；".join(warnings) + "\n"
+        evidence_section += "\n请优先使用以下事实作为文章骨架：\n"
+        for fact in fact_pack.get("facts", [])[:12]:
+            evidence_section += (
+                f"- [{fact.get('id')}] {fact.get('claim')} "
+                f"来源: {fact.get('source_title')} ({fact.get('url')})\n"
+            )
+        evidence_section += "\n"
 
     # 记忆部分
     memory_section = ""
@@ -119,6 +144,7 @@ def build_user_prompt(
         topic_name=topic_name,
         article_count=len(articles),
         articles_text=articles_text,
+        evidence_section=evidence_section,
         memory_section=memory_section,
         date=datetime.now().strftime("%Y-%m-%d"),
     )

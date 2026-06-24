@@ -37,6 +37,46 @@ newsweaver generate --topic "AI"
 
 ---
 
+## 用户工作台与可信生成
+
+### 本地 Web 简易上手台
+
+```bash
+newsweaver web
+```
+
+默认打开 `http://127.0.0.1:8765`。页面会按三步引导使用：
+
+1. 连接模型：只填 API Key，高级设置可先不管。
+2. 选择方向：从“AI 大模型 / 芯片半导体 / 互联网公司 / 新能源车 / 出海公司”等模板一键创建主题。
+3. 生成报告：先体检素材质量，再生成报告并查看历史报告。
+
+### 生成前检查
+
+```bash
+newsweaver doctor
+```
+
+用于检查 Python 版本、依赖包、LLM 配置、主题数量和输出目录权限。
+
+### 生成前预览
+
+```bash
+newsweaver preview --topic "AI" --limit 10 --save
+```
+
+预览会展示采集文章、相关性分数、来源数量和质量评分；加上 `--save` 会把预览保存到 `output/preview/`。
+
+### 可信度侧边文件
+
+每次运行 `newsweaver generate` 后，除了 Markdown 报告，还会生成三类侧边文件：
+
+- `.facts.json`：事实证据包，记录每条事实对应的来源文章和 URL
+- `.quality.json`：质量评分，包括文章数、来源数、正文提取覆盖率和风险提示
+- `.clusters.json`：轻量事件聚类，辅助判断报道素材是否过于集中
+
+---
+
 ## 目录
 
 - [特性](#特性)
