@@ -75,6 +75,70 @@ newsweaver preview --topic "AI" --limit 10 --save
 - `.quality.json`：质量评分，包括文章数、来源数、正文提取覆盖率和风险提示
 - `.clusters.json`：轻量事件聚类，辅助判断报道素材是否过于集中
 
+### 趋势记忆与 Agent 闭环
+
+每次生成后，NewsWeaver 会把本期内容写入结构化记忆：
+
+- 事件：本期发生了什么
+- 实体：反复出现的公司、产品、人物和机构
+- 指标：金额、比例、数量、Token 等可追踪数据
+- 判断：基于证据的阶段性结论
+
+查看趋势卡片：
+
+```bash
+newsweaver trend --topic "AI"
+```
+
+生成报告时，Prompt 会自动加入历史趋势，并要求报告包含“本期和过去相比变化了什么”。
+
+### 订阅模板
+
+```bash
+newsweaver template list
+newsweaver template add ai
+newsweaver template add chip
+newsweaver template add ev
+newsweaver template add global
+newsweaver template add fintech
+```
+
+内置模板覆盖 AI、芯片、新能源、出海、金融科技等方向。
+
+### 定时任务
+
+```bash
+# 每天 09:00 自动生成
+newsweaver schedule add --topic "AI" --cadence daily --time 09:00
+
+# 查看任务
+newsweaver schedule list
+
+# 只检查并运行一次到期任务
+newsweaver schedule run --once
+
+# 常驻调度器
+newsweaver schedule run --interval 300
+```
+
+调度配置保存在 `~/.newsweaver/schedule.json`。
+
+### 多格式输出与半自动发布
+
+每次生成报告会同时输出：
+
+- `.md`：Markdown 正文
+- `.html`：可阅读 HTML
+- `.wechat.md`：公众号草稿
+- `.email.md`：邮件摘要
+- `.publish.json`：标题候选、社媒摘要、封面图 prompt
+
+查看发布素材：
+
+```bash
+newsweaver publish --topic "AI" --platform linkedin --kit
+```
+
 ---
 
 ## 目录

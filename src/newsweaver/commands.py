@@ -10,6 +10,7 @@ import click
 
 from .config import load_config, save_config, set_nested, get_nested, find_topic
 from .pipeline import article_to_dict, build_fact_pack, build_quality_report, collect_articles
+from .templates import get_topic_template, list_topic_templates
 from .utils import get_output_dir, logger
 
 
@@ -333,13 +334,161 @@ def memory_show(topic, config_path):
 
 @memory_group.command("compact")
 @click.option("--topic", "-t", required=True, help="主题名称")
+@click.option("--force", is_flag=True, help="强制压缩所有 L2 记录")
 @click.option("--config", "config_path", default=None, help="配置文件路径")
-def memory_compact(topic, config_path):
+def memory_compact(topic, force, config_path):
     """手动将 L2 旧数据压缩到 L3"""
     from .memory.compact import compact_memory
 
-    count = compact_memory(topic)
+    count = compact_memory(topic, force=force)
     click.echo(f"✓ 已将 {count} 条 L2 记录压缩至 L3")
+
+
+# ───────────────── trend 命令 ─────────────────
+
+@click.command("trend")
+@click.option("--topic", "-t", required=True, help="主题名称")
+@click.option("--output", "-o", default=None, help="保存趋势卡片 Markdown 路径")
+def trend_cmd(topic, output):
+    """输出趋势卡片：热点、玩家、拐点和周期变化"""
+    from .memory.trends import build_trend_cards, format_trend_cards
+
+    cards = build_trend_cards(topic)
+    text = format_trend_cards(cards)
+    click.echo(text)
+    if output:
+        path = Path(output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        click.echo(f">>> 趋势卡片已保存至 {path}")
+
+
+# ───────────────── template 命令组 ─────────────────
+
+@click.group("template")
+def template_group():
+    """管理内置订阅主题模板"""
+    pass
+
+
+@template_group.command("list")
+def template_list():
+    """列出内置主题模板"""
+    for item in list_topic_templates():
+        click.echo(f"{item['id']}: {item['name']} - {item.get('description', '')}")
+
+
+@template_group.command("add")
+@click.argument("template_id")
+@click.option("--name", default=None, help="覆盖模板主题名称")
+@click.option("--config", "config_path", default=None, help="配置文件路径")
+def template_add(template_id, name, config_path):
+    """从内置模板创建主题"""
+    config = load_config(config_path)
+    try:
+        topic = get_topic_template(template_id)
+    except KeyError:
+        click.echo(f"错误：模板 {template_id} 不存在，可运行 `newsweaver template list` 查看", err=True)
+        raise SystemExit(1)
+    if name:
+        topic["name"] = name
+    if find_topic(config, topic["name"]):
+        click.echo(f"错误：主题 \"{topic['name']}\" 已存在", err=True)
+        raise SystemExit(1)
+    topic.pop("description", None)
+    config.setdefault("topics", []).append(topic)
+    save_config(config, config_path)
+    click.echo(f"✓ 已添加模板主题：{topic['name']}")
+
+
+# ───────────────── schedule 命令组 ─────────────────
+
+@click.group("schedule")
+def schedule_group():
+    """管理每日/每周自动生成任务"""
+    pass
+
+
+@schedule_group.command("add")
+@click.option("--topic", "-t", required=True, help="主题名称")
+@click.option("--cadence", type=click.Choice(["daily", "weekly"]), default="daily", show_default=True)
+@click.option("--time", "run_time", default="09:00", show_default=True, help="运行时间 HH:MM")
+@click.option("--config", "config_path", default=None, help="配置文件路径")
+def schedule_add(topic, cadence, run_time, config_path):
+    """新增或覆盖一个定时生成任务"""
+    from .scheduler import add_job
+
+    config = load_config(config_path)
+    if not find_topic(config, topic):
+        click.echo(f"错误：主题 \"{topic}\" 不存在，请先用 topic add 或 template add 创建", err=True)
+        raise SystemExit(1)
+    hour, minute = parse_hhmm(run_time)
+    job = add_job(topic, cadence=cadence, hour=hour, minute=minute)
+    click.echo(f"✓ 已添加任务 {job['id']}，下次运行：{job['next_run_at']}")
+
+
+@schedule_group.command("list")
+def schedule_list():
+    """列出本地定时任务"""
+    from .scheduler import load_schedule
+
+    jobs = load_schedule().get("jobs", [])
+    if not jobs:
+        click.echo("暂无定时任务。")
+        return
+    for job in jobs:
+        status = "enabled" if job.get("enabled", True) else "disabled"
+        click.echo(
+            f"{job['id']} | {job['topic']} | {job['cadence']} "
+            f"{job.get('hour', 9):02d}:{job.get('minute', 0):02d} | {status} | next={job.get('next_run_at', '')}"
+        )
+
+
+@schedule_group.command("remove")
+@click.argument("job_id")
+def schedule_remove(job_id):
+    """删除一个定时任务"""
+    from .scheduler import remove_job
+
+    if remove_job(job_id):
+        click.echo(f"✓ 已删除任务 {job_id}")
+    else:
+        click.echo(f"错误：任务 {job_id} 不存在", err=True)
+        raise SystemExit(1)
+
+
+@schedule_group.command("run")
+@click.option("--once", is_flag=True, help="只检查并运行一次到期任务")
+@click.option("--interval", default=300, show_default=True, type=int, help="循环检查间隔秒数")
+@click.option("--config", "config_path", default=None, help="配置文件路径")
+def schedule_run(once, interval, config_path):
+    """运行本地调度器"""
+    from .scheduler import run_due_jobs, run_scheduler_loop
+
+    if once:
+        results = run_due_jobs(config_path=config_path)
+        if not results:
+            click.echo("当前没有到期任务。")
+        for result in results:
+            if result.get("ok"):
+                click.echo(f"✓ {result['topic']} -> {result['path']}")
+            else:
+                click.echo(f"✗ {result['topic']} - {result.get('error')}", err=True)
+        return
+    click.echo(f">>> 调度器已启动，每 {interval} 秒检查一次。按 Ctrl+C 停止。")
+    run_scheduler_loop(config_path=config_path, interval_seconds=interval)
+
+
+def parse_hhmm(value: str) -> tuple[int, int]:
+    try:
+        hour_s, minute_s = value.split(":", 1)
+        hour = int(hour_s)
+        minute = int(minute_s)
+    except Exception:
+        raise click.BadParameter("时间格式应为 HH:MM")
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise click.BadParameter("时间范围应为 00:00 到 23:59")
+    return hour, minute
 
 
 # ───────────────── publish 命令 ─────────────────
@@ -347,8 +496,9 @@ def memory_compact(topic, config_path):
 @click.command("publish")
 @click.option("--topic", "-t", required=True, help="主题名称")
 @click.option("--platform", "-p", required=True, type=click.Choice(["twitter", "linkedin", "mastodon"]), help="目标平台")
+@click.option("--kit", is_flag=True, help="只输出半自动发布素材包，不执行模拟发布")
 @click.option("--config", "config_path", default=None, help="配置文件路径")
-def publish_cmd(topic, platform, config_path):
+def publish_cmd(topic, platform, kit, config_path):
     """模拟发布到社交平台"""
     from .publisher import publish_to_social
 
@@ -358,6 +508,23 @@ def publish_cmd(topic, platform, config_path):
     if not md_files:
         click.echo(f"错误：未找到主题 \"{topic}\" 的已生成新闻文件", err=True)
         raise SystemExit(1)
+
+    publish_files = sorted(out_dir.glob(f"{topic}_*.publish.json"), reverse=True)
+    if kit:
+        if not publish_files:
+            click.echo("错误：未找到发布素材包，请先运行 generate 生成 .publish.json", err=True)
+            raise SystemExit(1)
+        data = json.loads(publish_files[0].read_text(encoding="utf-8"))
+        click.echo("# 发布素材包")
+        click.echo("\n## 标题候选")
+        for title in data.get("title_candidates", []):
+            click.echo(f"- {title}")
+        click.echo("\n## 社媒摘要")
+        summaries = data.get("social_summaries", {})
+        click.echo(summaries.get(platform, summaries.get("short", "")))
+        click.echo("\n## 封面图 Prompt")
+        click.echo(data.get("cover_prompt", ""))
+        return
 
     content = md_files[0].read_text(encoding="utf-8")
     result = publish_to_social(platform=platform, content=content)

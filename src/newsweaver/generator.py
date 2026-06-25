@@ -1,16 +1,16 @@
 """新闻生成主流程编排"""
 
-import json
-import re
 from datetime import datetime
 from pathlib import Path
 
 import click
 
+from .exporter import export_report_bundle
 from .extractor import extract_article
 from .llm.client import LLMClient
-from .llm.prompts import build_user_prompt, build_memory_prompt, SYSTEM_PROMPT
+from .llm.prompts import build_user_prompt, SYSTEM_PROMPT
 from .memory.store import MemoryStore
+from .memory.trends import add_structured_recent_memory, auto_compact_memory, render_memory_for_prompt
 from .pipeline import (
     article_to_dict,
     build_event_clusters,
@@ -52,10 +52,14 @@ def run_generate(config: dict, topic_obj: dict, model: str, limit: int) -> Path:
     # ── 2. 读取记忆 ──
     click.echo(">>> 读取记忆...")
     memory_store = MemoryStore(topic_name)
+    compacted = auto_compact_memory(topic_name)
+    if compacted:
+        click.echo(f">>> 自动压缩记忆: {compacted} 条 L2 -> L3")
     memory_data = memory_store.load()
     recent = memory_data.get("recent", [])
     long_term = memory_data.get("long_term", [])
     click.echo(f">>> L2 ({len(recent)} 条记录)，L3 ({len(long_term)} 周数据)")
+    trend_memory = render_memory_for_prompt(memory_data)
 
     # ── 3. 调用 LLM ──
     click.echo(f">>> 调用 LLM ({model}) 生成报道...")
@@ -74,6 +78,7 @@ def run_generate(config: dict, topic_obj: dict, model: str, limit: int) -> Path:
         long_term_memory=long_term[-4:] if long_term else None,
         fact_pack=fact_pack,
         quality_report=quality_report,
+        trend_memory=trend_memory,
     )
 
     report = llm.generate(SYSTEM_PROMPT, user_prompt, model=model)
@@ -84,16 +89,20 @@ def run_generate(config: dict, topic_obj: dict, model: str, limit: int) -> Path:
     out_file = out_dir / f"{topic_name}_{today}.md"
     out_file.write_text(report, encoding="utf-8")
     artifact_paths = write_artifacts(out_file, fact_pack, quality_report, event_clusters)
+    export_paths = export_report_bundle(out_file, report, topic_name, fact_pack, quality_report)
     click.echo(">>> 报道生成完成")
     click.echo(f">>> 事实包: {artifact_paths['facts']}")
     click.echo(f">>> 质量报告: {artifact_paths['quality']}")
+    click.echo(f">>> HTML: {export_paths['html']}")
+    click.echo(f">>> 发布素材包: {export_paths['publish']}")
     click.echo(f"\n{'='*50}")
     click.echo(report[:1000] + ("..." if len(report) > 1000 else ""))
     click.echo(f"{'='*50}\n")
 
     # ── 5. 更新 L2 记忆 ──
     click.echo(">>> 更新记忆...")
-    _update_memory(llm, topic_name, articles_dicts, memory_store)
+    add_structured_recent_memory(topic_name, articles_dicts, fact_pack, quality_report, report)
+    click.echo(">>> 结构化记忆已更新")
 
     return out_file
 
@@ -103,26 +112,3 @@ def _fetch_articles(config: dict, topic_obj: dict, limit: int) -> list:
     articles = collect_articles(config, topic_obj, limit)
     click.echo(f">>> 找到 {len(articles)} 篇文章")
     return articles
-
-
-def _update_memory(llm: LLMClient, topic_name: str, articles: list, store: MemoryStore) -> None:
-    """用 LLM 提取记忆摘要并更新 L2"""
-    try:
-        memory_prompt = build_memory_prompt(topic_name, articles)
-        raw = llm.generate("你是一个数据分析助手，只输出 JSON，不要其他内容。", memory_prompt)
-
-        # 提取 JSON
-        json_match = re.search(r"\{[\s\S]*\}", raw)
-        if not json_match:
-            logger.warning("记忆提取失败：LLM 未返回有效 JSON")
-            return
-
-        data = json.loads(json_match.group())
-        store.add_recent(
-            summary=data.get("summary", ""),
-            sentiment=float(data.get("sentiment", 0.5)),
-            top_entities=data.get("top_entities", []),
-        )
-        click.echo(">>> 记忆已更新")
-    except Exception as e:
-        logger.warning(f"记忆更新失败: {e}")

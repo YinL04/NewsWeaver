@@ -42,6 +42,9 @@ from .commands import (  # noqa: E402
     memory_group,
     preview_cmd,
     publish_cmd,
+    schedule_group,
+    template_group,
+    trend_cmd,
     web_cmd,
 )
 
@@ -52,6 +55,9 @@ main.add_command(preview_cmd)
 main.add_command(fetch_cmd)
 main.add_command(generate_cmd)
 main.add_command(memory_group)
+main.add_command(trend_cmd)
+main.add_command(template_group)
+main.add_command(schedule_group)
 main.add_command(publish_cmd)
 main.add_command(web_cmd)
 main.add_command(interactive_cmd)

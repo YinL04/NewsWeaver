@@ -37,6 +37,12 @@ const presets = [
     exclude_words: "代运营, 培训",
     description: "中国公司全球化和商业机会",
   },
+  {
+    name: "金融科技",
+    keywords: "金融科技, 支付, 稳定币, 跨境支付, 数字银行, 风控",
+    exclude_words: "贷款广告, 培训",
+    description: "支付、跨境结算和监管变化",
+  },
 ];
 
 const $ = (id) => document.getElementById(id);

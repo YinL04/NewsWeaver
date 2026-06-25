@@ -64,6 +64,10 @@ USER_PROMPT_TEMPLATE = """请根据以下素材，写一篇完整的自媒体风
 
 （串联线索、发现趋势、预判未来。这是文章的核心价值）
 
+## 本期和过去相比变化了什么
+
+（必须结合历史趋势记忆：哪些玩家延续热度，哪些信号新出现，哪些判断需要修正）
+
 ## 关键玩家动态
 
 （用表格简洁展示各主要实体的最新动态和你的解读）
@@ -87,6 +91,7 @@ def build_user_prompt(
     long_term_memory: list | None = None,
     fact_pack: dict | None = None,
     quality_report: dict | None = None,
+    trend_memory: str | None = None,
 ) -> str:
     """构造 User Prompt"""
     from datetime import datetime
@@ -123,6 +128,9 @@ def build_user_prompt(
 
     # 记忆部分
     memory_section = ""
+    if trend_memory:
+        memory_section += trend_memory.strip() + "\n\n"
+
     if recent_memory:
         memory_section += "## 近期记忆（L2，最近 7 天）\n\n"
         for r in recent_memory:
