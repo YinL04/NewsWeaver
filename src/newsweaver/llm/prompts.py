@@ -47,8 +47,8 @@ USER_PROMPT_TEMPLATE = """请根据以下素材，写一篇完整的自媒体风
 3. **有观点**：基于事实给出你的洞察和预判
 4. **有导语**：用一句话抓住读者注意力
 5. **有节奏**：段落不要太长，重要观点加粗强调
-6. **有来源**：关键事实引用原文链接
-7. **受证据约束**：重要判断必须能回到“事实证据包”中的来源，不要补写没有来源支撑的具体数字、融资额、人物引语
+6. **有来源**：每个关键事实后必须使用 `[F001]` 这样的证据编号，编号必须来自事实证据包
+7. **受证据约束**：所有数字、金额、比例、人物引语必须紧跟证据编号；不要补写没有来源支撑的信息
 
 请严格按照以下结构输出：
 
@@ -92,6 +92,7 @@ def build_user_prompt(
     fact_pack: dict | None = None,
     quality_report: dict | None = None,
     trend_memory: str | None = None,
+    preferences: dict | None = None,
 ) -> str:
     """构造 User Prompt"""
     from datetime import datetime
@@ -148,12 +149,18 @@ def build_user_prompt(
     if not memory_section:
         memory_section = "## 历史记忆\n\n首次分析，暂无历史记忆数据。这是第一篇报道，后续会自动对比历史趋势。\n\n"
 
+    preferences = preferences or {}
+    preference_text = (
+        f"\n## 用户偏好\n\n- 目标受众：{preferences.get('audience', '行业关注者')}"
+        f"\n- 写作风格：{preferences.get('style', '深度分析')}"
+        f"\n- 篇幅：{preferences.get('length', '中等')}\n"
+    )
     return USER_PROMPT_TEMPLATE.format(
         topic_name=topic_name,
         article_count=len(articles),
         articles_text=articles_text,
         evidence_section=evidence_section,
-        memory_section=memory_section,
+        memory_section=memory_section + preference_text,
         date=datetime.now().strftime("%Y-%m-%d"),
     )
 

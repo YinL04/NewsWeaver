@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "newsweaver"
-version = "1.0.0"
+version = "1.1.0"
 description = "可定制 AI 资讯 Agent - 自动采集、分析、生成新闻报道"
 readme = "README.md"
 requires-python = ">=3.10"

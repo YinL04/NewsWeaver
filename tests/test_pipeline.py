@@ -1,11 +1,14 @@
 import unittest
+from unittest.mock import patch
 
 from newsweaver.fetcher.base import Article
 from newsweaver.pipeline import (
     build_fact_pack,
     build_quality_report,
+    audit_report,
     dedupe_articles,
     normalize_url,
+    prepare_articles,
     rank_articles,
 )
 
@@ -59,6 +62,31 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(facts["source_count"], 3)
         self.assertEqual(len(facts["facts"]), 3)
         self.assertGreaterEqual(quality["score"], 50)
+        self.assertTrue(quality["ready"])
+
+    def test_quality_gate_explains_blockers(self):
+        articles = [article("Only item", "https://example.com/1", source="A", full_text="body")]
+        quality = build_quality_report("AI", articles, build_fact_pack("AI", articles))
+        self.assertFalse(quality["ready"])
+        self.assertIn("至少需要 3 篇相关文章", quality["blockers"])
+        self.assertIn("至少需要 2 个独立来源", quality["blockers"])
+
+    def test_audit_report_detects_invalid_and_uncited_numbers(self):
+        articles = [article("Launch", "https://example.com/1", full_text="Revenue grew 30%.")]
+        facts = build_fact_pack("AI", articles)
+        audit = audit_report("收入增长 30%。\n有据可查 [F999]", facts)
+        self.assertFalse(audit["valid"])
+        self.assertEqual(audit["invalid_ids"], ["F999"])
+        self.assertTrue(audit["numeric_without_citation"])
+
+    @patch("newsweaver.pipeline.collect_articles")
+    def test_prepare_articles_applies_required_words(self, collect):
+        collect.return_value = [
+            article("AI policy", "https://example.com/1", full_text="AI regulation update"),
+            article("AI product", "https://example.com/2", full_text="AI launch update"),
+        ]
+        result = prepare_articles({}, {"keywords": ["AI"], "required_words": ["regulation"]}, 10)
+        self.assertEqual([item.title for item in result], ["AI policy"])
 
 
 if __name__ == "__main__":

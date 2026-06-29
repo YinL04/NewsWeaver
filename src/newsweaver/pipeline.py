@@ -7,6 +7,7 @@ import re
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .fetcher.base import Article
@@ -68,6 +69,34 @@ def collect_articles(config: dict, topic_obj: dict, limit: int | None = None) ->
         )
 
     return rank_articles(dedupe_articles(articles), topic_obj.get("keywords", []))[:limit]
+
+
+def prepare_articles(
+    config: dict,
+    topic_obj: dict,
+    limit: int | None = None,
+    progress: Callable[[str, int, str], None] | None = None,
+) -> list[Article]:
+    """Run the canonical collection pipeline used by both preview and generation."""
+    notify = progress or (lambda _stage, _percent, _message: None)
+    notify("collect", 10, "正在采集资讯源")
+    articles = collect_articles(config, topic_obj, limit)
+    notify("extract", 28, f"正在提取 {len(articles)} 篇正文")
+    total = max(1, len(articles))
+    for index, article in enumerate(articles, 1):
+        if not article.full_text or article.full_text == article.summary:
+            from .extractor import extract_article
+            article.full_text = extract_article(article.url) or article.summary
+        notify("extract", 28 + int(index / total * 27), f"正文提取 {index}/{len(articles)}")
+
+    required = [word.lower() for word in topic_obj.get("required_words", []) if word]
+    if required:
+        articles = [
+            article for article in articles
+            if all(word in f"{article.title} {article.summary} {article.full_text}".lower() for word in required)
+        ]
+    notify("analyze", 60, "正在去重、排序并构建证据")
+    return rank_articles(dedupe_articles(articles), topic_obj.get("keywords", []))[: limit or 10]
 
 
 def normalize_url(url: str) -> str:
@@ -208,6 +237,14 @@ def build_quality_report(topic_name: str, articles: list[Article], facts: dict) 
     if full_text_count < max(1, article_count // 2):
         warnings.append("Many articles only have summaries, not extracted full text.")
 
+    blockers = []
+    if article_count < 3:
+        blockers.append("至少需要 3 篇相关文章")
+    if source_count < 2:
+        blockers.append("至少需要 2 个独立来源")
+    if full_text_count < max(1, (article_count + 1) // 2):
+        blockers.append("至少一半文章需要成功提取正文")
+
     return {
         "topic": topic_name,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -216,6 +253,38 @@ def build_quality_report(topic_name: str, articles: list[Article], facts: dict) 
         "source_count": source_count,
         "full_text_count": full_text_count,
         "citation_count": citation_count,
+        "warnings": warnings,
+        "ready": not blockers,
+        "blockers": blockers,
+    }
+
+
+def audit_report(report: str, facts: dict) -> dict:
+    """Check citation validity and flag numeric claims without an evidence id."""
+    valid_ids = {fact.get("id") for fact in facts.get("facts", []) if fact.get("id")}
+    cited = set(re.findall(r"\[(F\d{3})\]", report or ""))
+    invalid = sorted(cited - valid_ids)
+    numeric_without_citation = []
+    for raw in (report or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith("- ["):
+            continue
+        if re.search(r"\d+(?:\.\d+)?(?:%|％|亿|万|美元|元|人|家|款|倍)", line) and not re.search(r"\[F\d{3}\]", line):
+            numeric_without_citation.append(line[:180])
+    coverage = round(len(cited & valid_ids) / max(1, len(valid_ids)) * 100)
+    warnings = []
+    if invalid:
+        warnings.append("存在无效证据编号")
+    if numeric_without_citation:
+        warnings.append("存在未标注证据的数字陈述")
+    if coverage < 50 and valid_ids:
+        warnings.append("证据引用覆盖率偏低")
+    return {
+        "valid": not invalid and not numeric_without_citation,
+        "citation_coverage": coverage,
+        "cited_ids": sorted(cited & valid_ids),
+        "invalid_ids": invalid,
+        "numeric_without_citation": numeric_without_citation[:12],
         "warnings": warnings,
     }
 
