@@ -1,12 +1,13 @@
-const state = { topics: [], reports: [], config: {}, preview: null, report: null, selectedPreset: null, working: false };
+const state = { topics: [], reports: [], config: {}, health: null, preview: null, report: null, selectedPreset: null, working: false };
 const presets = [
-  ["AI 大模型", "大模型, GPT, OpenAI, DeepSeek, Qwen, LLM", "教程, 招聘", "模型发布、价格与行业变化"],
-  ["芯片半导体", "NVIDIA, AMD, 芯片, 半导体, AI 加速器", "游戏, 显卡评测", "算力、供应链与厂商动向"],
-  ["互联网公司", "字节跳动, 腾讯, 阿里, 美团, 百度", "八卦, 游戏攻略", "大厂业务、组织与产品"],
-  ["新能源车", "新能源车, 比亚迪, 特斯拉, 小鹏, 理想, 蔚来", "二手车, 车主论坛", "新品、销量与产业链"],
-  ["出海公司", "出海, 跨境, TikTok, SHEIN, Temu", "代运营, 培训", "全球化与商业机会"],
-  ["金融科技", "金融科技, 支付, 稳定币, 跨境支付, 数字银行", "贷款广告, 培训", "支付、结算与监管变化"],
-].map(([name, keywords, exclude_words, description]) => ({ name, keywords, exclude_words, description }));
+  ["AI 大模型", "大模型, GPT, OpenAI, DeepSeek, Qwen, LLM", "教程, 招聘", "模型发布、价格与行业变化", "模型, 发布, 价格", "行业关注者", "深度分析", "中等"],
+  ["芯片半导体", "NVIDIA, AMD, 芯片, 半导体, AI 加速器", "游戏, 显卡评测", "算力、供应链与厂商动向", "算力, 供应链", "产业研究员", "决策简报", "中等"],
+  ["互联网公司", "字节跳动, 腾讯, 阿里, 美团, 百度", "八卦, 游戏攻略", "大厂业务、组织与产品", "产品, 业务", "产品经理", "深度分析", "中等"],
+  ["新能源车", "新能源车, 比亚迪, 特斯拉, 小鹏, 理想, 蔚来", "二手车, 车主论坛", "新品、销量与产业链", "销量, 新品", "产业观察者", "简洁快报", "中等"],
+  ["出海公司", "出海, 跨境, TikTok, SHEIN, Temu", "代运营, 培训", "全球化与商业机会", "海外, 市场", "创业者", "决策简报", "中等"],
+  ["金融科技", "金融科技, 支付, 稳定币, 跨境支付, 数字银行", "贷款广告, 培训", "支付、结算与监管变化", "监管, 支付", "业务负责人", "决策简报", "中等"],
+].map(([name, keywords, exclude_words, description, required_words, audience, style, length]) => ({ name, keywords, exclude_words, description, required_words, audience, style, length }));
+const healthLabels = { python: "Python", dependencies: "依赖", llm: "模型", topics: "主题", output: "输出目录", sources: "信源" };
 const $ = (id) => document.getElementById(id);
 
 async function api(path, options = {}) {
@@ -24,9 +25,14 @@ function setWorking(value, text = "") {
   if (value && text) setStatus(text);
 }
 
-async function loadState() { setStatus("正在检查..."); applyState(await api("/api/state")); setStatus("可以开始", "ok"); }
-function applyState(data) { state.topics = data.topics || []; state.reports = data.reports || []; state.config = data.config || {}; renderAll(); }
-function renderAll() { renderConfig(); renderPresets(); renderTopics(); renderReports(); renderGuide(); renderNextAction(); }
+async function loadState() {
+  setStatus("正在检查...");
+  const [appState, health] = await Promise.all([api("/api/state"), api("/api/health")]);
+  applyState(appState, health);
+  setStatus(health.ready ? "可以开始" : "需要配置", health.ready ? "ok" : "error");
+}
+function applyState(data, health = state.health) { state.topics = data.topics || []; state.reports = data.reports || []; state.config = data.config || {}; state.health = health; renderAll(); }
+function renderAll() { renderConfig(); renderHealth(); renderPresets(); renderTopics(); renderReports(); renderGuide(); renderNextAction(); }
 
 function renderConfig() {
   const llm = state.config.llm || {}, search = state.config.search || {}, form = $("configForm");
@@ -39,6 +45,14 @@ function renderConfig() {
 function renderPresets() {
   $("presetGrid").innerHTML = presets.map(p => `<button class="preset-card ${state.selectedPreset === p.name ? "selected" : ""}" type="button" data-preset="${escapeHtml(p.name)}"><strong>${escapeHtml(p.name)}</strong><span>${escapeHtml(p.description)}</span></button>`).join("");
   document.querySelectorAll(".preset-card").forEach(button => button.onclick = () => choosePreset(button.dataset.preset));
+}
+function renderHealth() {
+  const health = state.health || {};
+  if ($("healthVersion")) $("healthVersion").textContent = health.version ? `v${health.version}` : "未检查";
+  if ($("healthNext")) $("healthNext").textContent = health.next_action || "正在检查本地环境。";
+  const checks = health.checks || [];
+  if ($("healthChecks")) $("healthChecks").innerHTML = checks.map(check => `<div class="health-check ${check.level}"><span>${check.ok ? "✓" : check.optional ? "!" : "×"}</span><div><strong>${escapeHtml(healthLabels[check.name] || check.name)}</strong><small>${escapeHtml(check.detail)}${check.fix ? ` · ${escapeHtml(check.fix)}` : ""}</small></div></div>`).join("");
+  if ($("logPath")) $("logPath").textContent = health.log_file || "暂无";
 }
 function renderTopics() {
   const old = $("topicSelect").value; $("topicSelect").innerHTML = state.topics.length ? state.topics.map(t => `<option>${escapeHtml(t.name)}</option>`).join("") : '<option value="">还没有主题</option>';
@@ -63,11 +77,12 @@ function renderNextAction() {
   function next(title, desc, label, action) { $("nextTitle").textContent = title; $("nextDescription").textContent = desc; button.textContent = label; button.onclick = action; }
 }
 
-function choosePreset(name) { const p = presets.find(item => item.name === name); if (!p) return; resetTopicForm(); state.selectedPreset = name; const f = $("topicForm"); f.name.value = p.name; f.keywords.value = p.keywords; f.exclude_words.value = p.exclude_words; f.sources.value = "rss"; renderPresets(); setStatus(`已选择：${name}`, "ok"); }
-async function saveConfig(event) { event.preventDefault(); setWorking(true, "保存设置..."); try { const data = await api("/api/config", {method:"POST", body:JSON.stringify(Object.fromEntries(new FormData(event.currentTarget)))}); event.currentTarget.api_key.value = ""; applyState(data.state); setStatus("模型设置已保存", "ok"); } finally { setWorking(false); } }
+function choosePreset(name) { const p = presets.find(item => item.name === name); if (!p) return; resetTopicForm(); state.selectedPreset = name; const f = $("topicForm"); f.name.value = p.name; f.keywords.value = p.keywords; f.exclude_words.value = p.exclude_words; f.required_words.value = p.required_words || ""; f.sources.value = "rss"; f.audience.value = p.audience || "行业关注者"; f.style.value = p.style || "深度分析"; f.length.value = p.length || "中等"; renderPresets(); setStatus(`已选择：${name}`, "ok"); }
+async function refreshHealth() { state.health = await api("/api/health"); renderHealth(); renderGuide(); renderNextAction(); }
+async function saveConfig(event) { event.preventDefault(); setWorking(true, "保存设置..."); try { const data = await api("/api/config", {method:"POST", body:JSON.stringify(Object.fromEntries(new FormData(event.currentTarget)))}); event.currentTarget.api_key.value = ""; applyState(data.state, await api("/api/health")); setStatus("模型设置已保存", "ok"); } finally { setWorking(false); } }
 async function saveTopic(event) {
   event.preventDefault(); const body = Object.fromEntries(new FormData(event.currentTarget)); const editing = Boolean(body.original_name); setWorking(true, editing ? "更新主题..." : "创建主题...");
-  try { const data = await api(editing ? "/api/topics/update" : "/api/topics", {method:"POST", body:JSON.stringify(body)}); applyState(data.state); $("topicSelect").value = data.topic.name; resetTopicForm(); clearPreview(); setStatus(editing ? "主题已更新" : "主题已创建", "ok"); } finally { setWorking(false); }
+  try { const data = await api(editing ? "/api/topics/update" : "/api/topics", {method:"POST", body:JSON.stringify(body)}); applyState(data.state, await api("/api/health")); $("topicSelect").value = data.topic.name; resetTopicForm(); clearPreview(); setStatus(editing ? "主题已更新" : "主题已创建", "ok"); } finally { setWorking(false); }
 }
 function editTopic() {
   const topic = state.topics.find(t => t.name === $("topicSelect").value); if (!topic) return;
@@ -75,7 +90,7 @@ function editTopic() {
   $("topicSubmitBtn").textContent = "保存主题"; $("cancelEditBtn").classList.remove("hidden"); $("topicSection").scrollIntoView({behavior:"smooth"});
 }
 function resetTopicForm() { $("topicForm").reset(); $("topicForm").original_name.value = ""; $("topicSubmitBtn").textContent = "创建主题"; $("cancelEditBtn").classList.add("hidden"); state.selectedPreset = null; renderPresets(); }
-async function deleteTopic() { const name = $("topicSelect").value; if (!name || !confirm(`删除主题「${name}」及其记忆？`)) return; setWorking(true, "删除主题..."); try { const data = await api("/api/topics/delete", {method:"POST", body:JSON.stringify({name})}); applyState(data.state); clearPreview(); setStatus("主题已删除", "ok"); } finally { setWorking(false); } }
+async function deleteTopic() { const name = $("topicSelect").value; if (!name || !confirm(`删除主题「${name}」及其记忆？`)) return; setWorking(true, "删除主题..."); try { const data = await api("/api/topics/delete", {method:"POST", body:JSON.stringify({name})}); applyState(data.state, await api("/api/health")); clearPreview(); setStatus("主题已删除", "ok"); } finally { setWorking(false); } }
 
 async function preview() {
   const topic = $("topicSelect").value; if (!topic) throw new Error("请先创建主题"); setWorking(true, "正在采集并提取正文..."); showProgress("正在建立证据包", 20);
@@ -87,7 +102,9 @@ function renderPreview() {
   const data = state.preview, box = $("qualityBox"), list = $("articleList");
   if (!data) { box.className = "quality-box empty-state"; box.textContent = "还没有体检素材。体检会提取正文并建立可复用证据包。"; list.className = "article-list empty-state"; list.textContent = "暂无素材"; $("articleCount").textContent = "0 篇"; return; }
   const q = data.quality || {}, blockers = q.blockers || [], warnings = q.warnings || [];
-  box.className = `quality-box ${q.ready ? "ready" : "blocked"}`; box.innerHTML = `<div class="quality-score ${q.ready ? "" : "warn"}">${q.score || 0}</div><div><h3>${q.ready ? "达到生成门槛" : "需要人工确认"}</h3><p>${q.article_count} 篇文章 · ${q.source_count} 个来源 · ${q.full_text_count} 篇正文</p>${blockers.length ? `<ul>${blockers.map(x => `<li>${escapeHtml(x)}</li>`).join("")}</ul>` : ""}${warnings.length ? `<small>${warnings.map(translateWarning).join("；")}</small>` : ""}</div>`;
+  const status = q.status || {}, advice = q.advice || [];
+  box.className = `quality-box ${status.level || (q.ready ? "green" : "red")}`;
+  box.innerHTML = `<div class="quality-light ${status.level || "yellow"}"><span>${escapeHtml(status.label || (q.ready ? "绿灯" : "红灯"))}</span><strong>${q.score || 0}</strong></div><div><h3>${escapeHtml(status.title || (q.ready ? "达到生成门槛" : "需要人工确认"))}</h3><p>${q.article_count} 篇文章 · ${q.source_count} 个来源 · ${q.full_text_count} 篇正文</p><small>${escapeHtml(status.summary || "")}</small>${blockers.length ? `<ul>${blockers.map(x => `<li>${escapeHtml(x)}</li>`).join("")}</ul>` : ""}${warnings.length ? `<small>${warnings.map(translateWarning).join("；")}</small>` : ""}${advice.length ? `<div class="advice-list">${advice.map(x => `<span>${escapeHtml(x)}</span>`).join("")}</div>` : ""}</div>`;
   $("articleCount").textContent = `${data.articles.length} 篇`; list.className = "article-list"; list.innerHTML = data.articles.map((a,i) => `<article class="article-card"><div class="article-index">${String(i+1).padStart(2,"0")}</div><div><h4>${escapeHtml(a.title)}</h4><div class="article-meta"><span>${escapeHtml(a.source || "未知")}</span><span>${formatDate(a.published_at)}</span><span>相关性 ${a.relevance_score || 0}</span><span>${a.full_text && a.full_text.length > (a.summary||"").length ? "✓ 正文" : "仅摘要"}</span></div><a href="${safeUrl(a.url)}" target="_blank" rel="noreferrer">查看原文</a></div></article>`).join("");
 }
 
@@ -103,7 +120,7 @@ async function generate(force) {
 async function pollJob(id) {
   while (true) {
     const job = await api(`/api/job?id=${encodeURIComponent(id)}`); showProgress(job.message, job.percent || 0);
-    if (job.status === "complete") { applyState(await api("/api/state")); $("reportSelect").value = job.report; await loadReport(); activateTab("report"); setStatus("报告已生成", "ok"); setTimeout(hideProgress, 1000); return; }
+    if (job.status === "complete") { applyState(await api("/api/state"), await api("/api/health")); $("reportSelect").value = job.report; await loadReport(); activateTab("report"); setStatus("报告已生成", "ok"); setTimeout(hideProgress, 1000); return; }
     if (job.status === "failed") throw new Error(job.error || "生成失败");
     await delay(700);
   }

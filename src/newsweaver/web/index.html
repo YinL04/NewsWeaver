@@ -29,6 +29,16 @@
           <div class="metric-row"><div class="metric"><span>主题</span><strong id="topicMetric">0</strong></div><div class="metric"><span>报告</span><strong id="reportMetric">0</strong></div><div class="metric"><span>模型</span><strong id="modelMetric">未连接</strong></div></div>
         </section>
 
+        <section class="panel health-panel">
+          <div class="panel-head">
+            <div><p class="kicker">Health</p><h2>真实链路准备度</h2></div>
+            <span class="panel-tag" id="healthVersion">未检查</span>
+          </div>
+          <p id="healthNext" class="health-next">正在检查本地环境。</p>
+          <div id="healthChecks" class="health-grid"></div>
+          <p class="log-hint">错误日志：<code id="logPath">暂无</code></p>
+        </section>
+
         <section class="grid two-col setup-grid">
           <section class="panel" id="modelSection">
             <div class="panel-head"><div><p class="kicker">Model</p><h2>模型连接</h2></div><span class="panel-tag" id="modelTag">未连接</span></div>
@@ -48,12 +58,14 @@
               <input name="original_name" type="hidden" />
               <label class="field"><span>主题名称</span><input name="name" required /></label>
               <label class="field span-2"><span>关键词</span><input name="keywords" placeholder="大模型, GPT, OpenAI" required /></label>
-              <label class="field"><span>排除词</span><input name="exclude_words" placeholder="教程, 招聘" /></label>
-              <label class="field"><span>必须包含</span><input name="required_words" placeholder="可留空；多个词需同时出现" /></label>
-              <label class="field span-2"><span>信源</span><input name="sources" placeholder="rss, bing, 或自定义 RSS URL" /></label>
-              <label class="field"><span>受众</span><input name="audience" placeholder="行业关注者" /></label>
-              <label class="field"><span>风格</span><select name="style"><option>深度分析</option><option>简洁快报</option><option>决策简报</option></select></label>
-              <label class="field"><span>篇幅</span><select name="length"><option>中等</option><option>精简</option><option>详细</option></select></label>
+              <details class="advanced span-2"><summary>高级筛选和写作偏好</summary><div class="advanced-grid">
+                <label class="field"><span>排除词</span><input name="exclude_words" placeholder="教程, 招聘" /></label>
+                <label class="field"><span>必须包含</span><input name="required_words" placeholder="可留空；多个词需同时出现" /></label>
+                <label class="field span-2"><span>信源</span><input name="sources" placeholder="rss, bing, 或自定义 RSS URL" /></label>
+                <label class="field"><span>受众</span><input name="audience" placeholder="行业关注者" /></label>
+                <label class="field"><span>风格</span><select name="style"><option>深度分析</option><option>简洁快报</option><option>决策简报</option></select></label>
+                <label class="field"><span>篇幅</span><select name="length"><option>中等</option><option>精简</option><option>详细</option></select></label>
+              </div></details>
               <div class="form-actions"><button id="topicSubmitBtn" class="secondary-action" type="submit">创建主题</button><button id="cancelEditBtn" class="ghost-action hidden" type="button">取消编辑</button></div>
             </form>
           </section>

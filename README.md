@@ -26,6 +26,14 @@ echo NEWSWEAVER_LLM_MODEL=deepseek-chat >> .env
 newsweaver interactive
 ```
 
+Windows 也可以直接启动 Web 工作台：
+
+```powershell
+Copy-Item .env.example .env
+# 编辑 .env，填入 NEWSWEAVER_LLM_API_KEY
+.\run-web.ps1
+```
+
 或者直接用命令：
 
 ```bash
@@ -38,6 +46,36 @@ newsweaver generate --topic "AI"
 ---
 
 ## 用户工作台与可信生成
+
+### v1.2 Beta：真实链路准备度
+
+Web 工作台新增“真实链路准备度”面板，会在启动后检查：
+
+- Python 版本与关键依赖
+- LLM API Key、模型和 Base URL
+- 是否已经创建主题
+- `output/` 是否可写
+- 错误日志位置
+
+后端同时提供健康检查接口：
+
+```bash
+curl http://127.0.0.1:8765/api/health
+```
+
+如果采集、生成或改写失败，异常会写入本地日志：
+
+```text
+~/.newsweaver/logs/newsweaver.log
+```
+
+素材体检现在会给出红黄绿状态：
+
+- 绿灯：文章数、来源数、正文覆盖率都达标，可以直接生成
+- 黄灯：可以生成，但建议人工复核
+- 红灯：素材不足，需要放宽关键词、增加信源或提高采集数量
+
+主题创建页也做了首次启动优化：新用户只需要填写主题名和关键词；排除词、必须包含词、信源、受众、风格、篇幅都收进“高级筛选和写作偏好”。
 
 ### 本地 Web 简易上手台
 

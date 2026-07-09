@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import mimetypes
 import re
+import sys
 import threading
 import time
 import uuid
@@ -14,10 +16,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from . import __version__
 from .config import find_topic, load_config, save_config
 from .memory.trends import build_trend_cards
 from .pipeline import article_to_dict, audit_report, build_fact_pack, build_quality_report, prepare_articles
-from .utils import atomic_write_json, get_memory_dir, get_output_dir, read_json
+from .utils import atomic_write_json, get_log_file, get_memory_dir, get_output_dir, log_exception, read_json
 
 
 WEB_ROOT = Path(__file__).parent / "web"
@@ -27,12 +30,13 @@ STATE_LOCK = threading.Lock()
 
 
 class NewsWeaverHandler(BaseHTTPRequestHandler):
-    server_version = "NewsWeaverWeb/1.1"
+    server_version = "NewsWeaverWeb/1.2"
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         routes = {
             "/api/state": lambda: self._json(self._state()),
+            "/api/health": lambda: self._json(build_health_report()),
             "/api/report": lambda: self._get_report(parse_qs(parsed.query)),
             "/api/job": lambda: self._get_job(parse_qs(parsed.query)),
             "/api/trend": lambda: self._get_trend(parse_qs(parsed.query)),
@@ -67,6 +71,7 @@ class NewsWeaverHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._json({"error": str(exc)}, status=400)
         except Exception as exc:
+            log_exception(f"{self.command} {self.path}", exc)
             self._json({"error": str(exc)}, status=500)
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
@@ -199,7 +204,7 @@ class NewsWeaverHandler(BaseHTTPRequestHandler):
         limit = int(body.get("limit") or config.get("search", {}).get("default_limit", 10))
         articles = prepare_articles(config, topic, limit)
         facts = build_fact_pack(topic_name, articles)
-        quality = build_quality_report(topic_name, articles, facts)
+        quality = enrich_quality_report(build_quality_report(topic_name, articles, facts))
         preview_id = uuid.uuid4().hex
         with STATE_LOCK:
             PREVIEWS[preview_id] = {"topic": topic_name, "created": time.time(), "articles": articles}
@@ -219,7 +224,7 @@ class NewsWeaverHandler(BaseHTTPRequestHandler):
         if not topic or not preview or preview.get("topic") != topic_name:
             raise ValueError("素材预览已失效，请重新体检")
         facts = build_fact_pack(topic_name, preview["articles"])
-        quality = build_quality_report(topic_name, preview["articles"], facts)
+        quality = enrich_quality_report(build_quality_report(topic_name, preview["articles"], facts))
         force = bool(body.get("force"))
         if not quality.get("ready") and not force:
             return self._json({"error": "素材未达到生成门槛", "quality": quality, "requires_confirmation": True}, 409)
@@ -331,6 +336,7 @@ def _run_generation_job(job_id: str, config: dict, topic: dict, model: str, arti
         path = run_generate(config, topic, model, len(articles), prepared_articles=articles, force=force, progress=progress)
         JOBS[job_id].update({"status": "complete", "stage": "complete", "percent": 100, "message": "报告已完成", "report": path.name})
     except Exception as exc:
+        log_exception(f"generation job {job_id}", exc)
         JOBS[job_id].update({"status": "failed", "message": str(exc), "error": str(exc)})
 
 
@@ -352,6 +358,108 @@ def _report_versions(target: Path) -> list[dict]:
     if not version_dir.exists():
         return []
     return [{"name": p.name, "modified": p.stat().st_mtime} for p in sorted(version_dir.glob("*.md"), reverse=True)[:20]]
+
+
+def build_health_report() -> dict:
+    """Return Web-friendly diagnostics for first-run and real-chain validation."""
+    config = load_config()
+    checks = [
+        _health_check("python", sys.version_info >= (3, 10), f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}", "请使用 Python 3.10 或更高版本。"),
+    ]
+    missing = [package for package in ("click", "requests", "feedparser", "bs4", "lxml", "readability", "openai") if importlib.util.find_spec(package) is None]
+    checks.append(_health_check("dependencies", not missing, "依赖完整" if not missing else "缺少 " + ", ".join(missing), "运行 pip install -e . 安装依赖。"))
+    llm = config.get("llm", {})
+    has_key = bool(llm.get("api_key")) and llm.get("api_key") != "sk-your-api-key-here"
+    checks.append(_health_check("llm", has_key, llm.get("model", "未设置"), "填写 API Key 后才能真实生成报告。"))
+    topics = config.get("topics", [])
+    checks.append(_health_check("topics", bool(topics), f"{len(topics)} 个主题", "从模板创建一个主题。"))
+    checks.append(_health_check("output", _output_dir_is_writable(), str(get_output_dir()), "检查 output 目录写入权限。"))
+    custom_sources = sum(1 for topic in topics for source in topic.get("sources", []) if source.startswith("rss:"))
+    checks.append(_health_check("sources", bool(topics), f"{custom_sources} 个自定义 RSS", "默认 RSS 可直接使用；也可为主题添加自定义 RSS。", optional=True))
+    blocking = [check for check in checks if not check["ok"] and not check.get("optional")]
+    return {
+        "version": __version__,
+        "ready": not blocking,
+        "checks": checks,
+        "log_file": str(get_log_file()),
+        "next_action": _next_health_action(blocking, topics),
+    }
+
+
+def _health_check(name: str, ok: bool, detail: str, fix: str, optional: bool = False) -> dict:
+    return {
+        "name": name,
+        "ok": ok,
+        "level": "ok" if ok else ("warn" if optional else "error"),
+        "detail": detail,
+        "fix": "" if ok else fix,
+        "optional": optional,
+    }
+
+
+def _output_dir_is_writable() -> bool:
+    try:
+        probe = get_output_dir() / ".health_write_test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def _next_health_action(blocking: list[dict], topics: list[dict]) -> str:
+    if not blocking:
+        return "环境已准备好，可以体检素材并生成报告。"
+    first = blocking[0]
+    if first["name"] == "llm":
+        return "先保存 API Key，然后再生成第一篇报告。"
+    if first["name"] == "topics" or not topics:
+        return "从主题模板开始，创建一个关注方向。"
+    return first.get("fix") or "按诊断提示修复后重试。"
+
+
+def enrich_quality_report(quality: dict) -> dict:
+    """Attach product-facing traffic-light status and actionable advice."""
+    score = int(quality.get("score") or 0)
+    blockers = quality.get("blockers") or []
+    warnings = quality.get("warnings") or []
+    if blockers:
+        status = {
+            "level": "red",
+            "label": "红灯",
+            "title": "素材不足，需要确认",
+            "summary": "继续生成可能导致报告偏薄或来源单一。",
+        }
+    elif score < 80 or warnings:
+        status = {
+            "level": "yellow",
+            "label": "黄灯",
+            "title": "可生成，但建议复核",
+            "summary": "素材基本够用，但仍有改进空间。",
+        }
+    else:
+        status = {
+            "level": "green",
+            "label": "绿灯",
+            "title": "素材健康，可直接生成",
+            "summary": "文章数、来源和正文覆盖率已达到门槛。",
+        }
+    quality["status"] = status
+    quality["advice"] = _quality_advice(quality)
+    return quality
+
+
+def _quality_advice(quality: dict) -> list[str]:
+    advice = []
+    if quality.get("article_count", 0) < 3:
+        advice.append("放宽关键词或增加采集数量，至少拿到 3 篇相关文章。")
+    if quality.get("source_count", 0) < 2:
+        advice.append("增加自定义 RSS 或启用 Bing，让来源不要集中在一家媒体。")
+    if quality.get("full_text_count", 0) < max(1, quality.get("article_count", 0) // 2):
+        advice.append("优先选择可提取正文的信源，否则报告只能基于摘要。")
+    if not advice:
+        advice.append("可以生成；生成后请查看引用审计和证据侧栏。")
+    return advice
 
 
 def _extract_section(content: str, heading: str) -> str:

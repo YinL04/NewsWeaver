@@ -5,17 +5,25 @@ import logging
 import os
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
+from traceback import format_exception
 
 logger = logging.getLogger("newsweaver")
 
 
 def setup_logging(verbose: bool = False) -> None:
     level = logging.DEBUG if verbose else logging.INFO
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter("%(message)s"))
     logger.setLevel(level)
-    logger.addHandler(handler)
+    if not any(isinstance(handler, logging.StreamHandler) for handler in logger.handlers):
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(handler)
+    log_file = get_log_file()
+    if not any(isinstance(handler, logging.FileHandler) and Path(handler.baseFilename) == log_file for handler in logger.handlers):
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(file_handler)
 
 
 def get_data_dir() -> Path:
@@ -37,6 +45,36 @@ def get_output_dir() -> Path:
     out_dir = Path.cwd() / "output"
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir
+
+
+def get_log_dir() -> Path:
+    """返回本地日志目录"""
+    candidates = [Path.home() / ".newsweaver" / "logs", Path.cwd() / "output" / "logs"]
+    for log_dir in candidates:
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            return log_dir
+        except OSError:
+            continue
+    return Path.cwd()
+
+
+def get_log_file() -> Path:
+    """返回默认错误日志文件"""
+    return get_log_dir() / "newsweaver.log"
+
+
+def log_exception(context: str, exc: BaseException) -> None:
+    """将异常追加写入本地日志，便于 Web 用户排查失败原因"""
+    get_log_dir().mkdir(parents=True, exist_ok=True)
+    lines = [
+        "",
+        f"[{datetime.now().isoformat(timespec='seconds')}] {context}",
+        "".join(format_exception(type(exc), exc, exc.__traceback__)).rstrip(),
+    ]
+    with open(get_log_file(), "a", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+        f.write("\n")
 
 
 def atomic_write_json(path: Path, data: dict) -> None:

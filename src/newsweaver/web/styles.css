@@ -240,6 +240,12 @@ h3 {
   color: var(--danger);
 }
 
+.status-pill.warn {
+  border-color: #e6ce91;
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
 .primary-action,
 .secondary-action,
 .danger-action {
@@ -312,6 +318,86 @@ button:disabled {
   margin-top: 6px;
   color: var(--muted);
   font-size: 14px;
+}
+
+.health-panel {
+  margin-bottom: 16px;
+}
+
+.health-next {
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.health-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.health-check {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  min-height: 70px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.health-check > span {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.health-check.error > span {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.health-check.warn > span {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.health-check strong,
+.health-check small {
+  display: block;
+}
+
+.health-check strong {
+  font-size: 13px;
+}
+
+.health-check small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.log-hint {
+  margin-top: 10px;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.log-hint code {
+  padding: 2px 5px;
+  border-radius: 5px;
+  background: var(--surface-2);
+  color: var(--muted);
 }
 
 .metric-row {
@@ -491,7 +577,7 @@ select:focus {
 }
 
 .topic-form .span-2 {
-  grid-column: 2;
+  grid-column: 1 / -1;
 }
 
 .operations {
@@ -549,7 +635,8 @@ select:focus {
   background: var(--surface-2);
 }
 
-.quality-score {
+.quality-score,
+.quality-light {
   display: grid;
   place-items: center;
   width: 64px;
@@ -563,6 +650,34 @@ select:focus {
 
 .quality-score.warn {
   background: var(--warning);
+}
+
+.quality-light {
+  align-content: center;
+  gap: 2px;
+  color: #ffffff;
+}
+
+.quality-light span {
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.quality-light strong {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.quality-light.green {
+  background: var(--accent);
+}
+
+.quality-light.yellow {
+  background: var(--warning);
+}
+
+.quality-light.red {
+  background: var(--danger);
 }
 
 .quality-box h3 {
@@ -716,6 +831,7 @@ select:focus {
   }
 
   .metric-row,
+  .health-grid,
   .preset-grid,
   .advanced-grid,
   .topic-form,
@@ -771,9 +887,14 @@ select:focus {
 .progress-track div { width: 0; height: 100%; border-radius: inherit; background: var(--accent); transition: width .25s ease; }
 .quality-box.ready { border-color: #acd9c5; background: #f1faf6; }
 .quality-box.blocked { border-color: #e6ce91; background: var(--warning-soft); }
+.quality-box.green { border-color: #acd9c5; background: #f1faf6; }
+.quality-box.yellow { border-color: #e6ce91; background: var(--warning-soft); }
+.quality-box.red { border-color: #e7bbbb; background: var(--danger-soft); }
 .quality-box.empty-state { grid-template-columns: 1fr; }
 .quality-box ul { margin: 7px 0 3px; padding-left: 18px; color: var(--warning); font-size: 12px; }
 .quality-box small { display: block; margin-top: 6px; color: var(--muted); }
+.advice-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.advice-list span { padding: 5px 7px; border-radius: 999px; background: rgba(255,255,255,.72); color: var(--muted); font-size: 12px; }
 .workspace-tabs { display: flex; gap: 4px; margin: 20px 0 0; border-bottom: 1px solid var(--line); }
 .tab { padding: 10px 16px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font-weight: 800; }
 .tab.active { border-color: var(--accent); color: var(--accent); }
