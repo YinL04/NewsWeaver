@@ -221,53 +221,125 @@ newsweaver publish --topic "AI" --platform linkedin --kit
 
 ### 系统架构
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      CLI (click)                            │
-│  ┌──────────┬──────────┬──────────┬──────────┬──────────┐   │
-│  │  topic   │  config  │  fetch   │ generate │ publish  │   │
-│  │  add/list│  set/show│  search  │  LLM gen │  social  │   │
-│  └────┬─────┴────┬─────┴────┬─────┴────┬─────┴────┬─────┘   │
-│       │          │          │          │          │          │
-└───────┼──────────┼──────────┼──────────┼──────────┼──────────┘
-        │          │          │          │          │
-        ▼          ▼          ▼          ▼          ▼
-   ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐
-   │  Topic  │ │ Config  │ │Fetcher  │ │   LLM   │ │Publisher│
-   │ Manager │ │ Manager │ │  Layer  │ │ Client  │ │ (Mock)  │
-   └─────────┘ └─────────┘ └────┬────┘ └────┬────┘ └─────────┘
-                                │            │
-                    ┌───────────┼────────────┼───────────┐
-                    │           │            │           │
-                    ▼           ▼            ▼           ▼
-              ┌──────────┐ ┌────────┐ ┌──────────┐ ┌─────────┐
-              │ RSS Feed │ │ Bing   │ │ Memory   │ │ Output  │
-              │ Parser   │ │ News   │ │ Store    │ │ (.md)   │
-              └──────────┘ └────────┘ └──────────┘ └─────────┘
+```mermaid
+flowchart TB
+  subgraph UI["用户入口"]
+    Web["Web 工作台"]
+    CLI["CLI / 定时任务"]
+  end
+
+  subgraph Core["NewsWeaver 核心能力"]
+    Topic["主题管理"]
+    Config["配置与健康检查"]
+    Fetch["采集层"]
+    Pipeline["素材处理与质量门禁"]
+    Prompt["Prompt 构造"]
+    LLM["OpenAI 兼容 LLM"]
+    Memory["趋势记忆 L2 / L3"]
+    Audit["引用审计"]
+    Publish["发布素材包"]
+  end
+
+  subgraph Sources["外部数据源"]
+    RSS["RSS 源"]
+    Bing["Bing News 可选"]
+    CustomRSS["自定义 RSS"]
+  end
+
+  subgraph Files["本地文件产物"]
+    ConfigFile["~/.newsweaver/config.json"]
+    MemoryFile["~/.newsweaver/memory/*.json"]
+    Output["output/*.md / *.html"]
+    Sidecars[".facts / .quality / .audit / .publish"]
+  end
+
+  Web --> Topic
+  Web --> Config
+  Web --> Pipeline
+  Web --> Audit
+  CLI --> Topic
+  CLI --> Fetch
+  CLI --> Prompt
+
+  Topic --> ConfigFile
+  Config --> ConfigFile
+  Fetch --> RSS
+  Fetch --> Bing
+  Fetch --> CustomRSS
+  RSS --> Pipeline
+  Bing --> Pipeline
+  CustomRSS --> Pipeline
+  Pipeline --> Prompt
+  Memory --> Prompt
+  Prompt --> LLM
+  LLM --> Output
+  Pipeline --> Sidecars
+  Output --> Audit
+  Audit --> Sidecars
+  Output --> Publish
+  Publish --> Sidecars
+  Memory --> MemoryFile
+  LLM --> Memory
 ```
 
 ### 核心流程
 
+```mermaid
+sequenceDiagram
+  actor User as 用户
+  participant Web as Web / CLI
+  participant Fetch as RSS / Bing 采集
+  participant Pipe as 素材处理流水线
+  participant Mem as 趋势记忆
+  participant LLM as LLM
+  participant Out as 输出文件
+  participant Audit as 引用审计
+
+  User->>Web: 选择主题并发起生成
+  Web->>Fetch: 按关键词、排除词、信源采集
+  Fetch-->>Pipe: 返回候选文章
+  Pipe->>Pipe: 正文提取、去重、排序、质量评分
+  Pipe-->>Web: 返回素材体检结果
+  Web->>Mem: 读取 L2 / L3 趋势记忆
+  Mem-->>Web: 返回历史趋势上下文
+  Web->>LLM: 提交事实包、趋势、写作指南
+  LLM-->>Web: 返回 Markdown 报告
+  Web->>Out: 写入 .md / .html / 发布素材包
+  Web->>Audit: 检查 [F001] 引用和数字陈述
+  Audit->>Out: 写入 .audit.json
+  Web->>Mem: 追加本期结构化记忆
 ```
-用户配置主题
-    │
-    ▼
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   采集新闻   │────▶│   读取记忆   │────▶│  构造 Prompt │
-│  (RSS/Bing) │     │  (L2 + L3)  │     │             │
-└─────────────┘     └─────────────┘     └──────┬──────┘
-                                                │
-                                                ▼
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│  输出报道   │◀────│  LLM 生成   │◀────│  加载 skill  │
-│  (.md文件)  │     │             │     │  写作指南    │
-└──────┬──────┘     └─────────────┘     └─────────────┘
-       │
-       ▼
-┌─────────────┐
-│  更新记忆   │
-│  (L2 → L3)  │
-└─────────────┘
+
+### 可信生成全链路流程图
+
+```mermaid
+flowchart TD
+  Start(["开始"])
+  Health["环境健康检查<br/>依赖 / API Key / 输出目录 / 主题"]
+  Topic["选择或创建主题"]
+  Preview["素材体检<br/>采集 RSS / Bing / 自定义源"]
+  Extract["正文提取与去重排序"]
+  Quality{"质量门禁<br/>文章数 / 来源数 / 正文覆盖率"}
+  Confirm{"是否强制继续？"}
+  Facts["构建事实证据包<br/>F001 / F002 / ..."]
+  Memory["读取趋势记忆<br/>近期 L2 + 长期 L3"]
+  Prompt["构造 Prompt<br/>事实 + 趋势 + 写作偏好"]
+  Generate["调用 LLM 生成报告"]
+  Save["保存 Markdown / HTML / WeChat / Email"]
+  Audit{"引用审计通过？"}
+  Workbench["报告工作台<br/>证据侧栏 / 编辑 / 版本恢复 / 局部改写"]
+  Publish["生成发布素材包<br/>标题 / 摘要 / 封面 Prompt"]
+  End(["完成"])
+  Stop(["暂停并提示用户修正"])
+
+  Start --> Health --> Topic --> Preview --> Extract --> Quality
+  Quality -- "绿灯 / 黄灯" --> Facts
+  Quality -- "红灯" --> Confirm
+  Confirm -- "是" --> Facts
+  Confirm -- "否" --> Stop
+  Facts --> Memory --> Prompt --> Generate --> Save --> Audit
+  Audit -- "是" --> Publish --> End
+  Audit -- "否" --> Workbench --> Audit
 ```
 
 ---
