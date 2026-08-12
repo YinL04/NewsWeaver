@@ -1,5 +1,8 @@
-"""Prompt 模板管理"""
+"""Prompt templates for evidence-constrained generation and repair."""
 
+import json
+import re
+from collections import defaultdict
 from pathlib import Path
 
 from ..utils import truncate
@@ -26,6 +29,14 @@ SYSTEM_PROMPT = f"""你是一位资深的自媒体新闻编辑，擅长将碎片
 
 你的任务是根据提供的新闻素材，生成一篇**完整的、有深度的自媒体风格新闻报道**，不是简单的新闻摘要。
 
+证据纪律是最高优先级：
+- 报告中的可验证事实只能来自“事实证据包”，文章列表只用于来源目录
+- 每个关键事实必须紧跟一个或多个准确的 `[Fxxx]`
+- 数字、日期、金额、比例、人物表态、直接归因必须逐项引用
+- 一个 `[Fxxx]` 只能支持该 fact 的 claim/source_span 实际包含的内容
+- 分析和预测必须明确写成分析，不得伪装成已发生事实
+- 如果证据不足，明确说明“现有证据不足”，不要补全常识或外部知识
+
 {SKILL_CONTENT}"""
 
 USER_PROMPT_TEMPLATE = """请根据以下素材，写一篇完整的自媒体风格新闻报道。
@@ -48,7 +59,8 @@ USER_PROMPT_TEMPLATE = """请根据以下素材，写一篇完整的自媒体风
 4. **有导语**：用一句话抓住读者注意力
 5. **有节奏**：段落不要太长，重要观点加粗强调
 6. **有来源**：每个关键事实后必须使用 `[F001]` 这样的证据编号，编号必须来自事实证据包
-7. **受证据约束**：所有数字、金额、比例、人物引语必须紧跟证据编号；不要补写没有来源支撑的信息
+7. **受证据约束**：只能使用事实证据包中的事实；所有数字、日期、金额、比例、人物引语和直接归因必须紧跟证据编号
+8. **精确引用**：引用必须支持它紧邻的具体 claim；不得用一条只包含 A 的 fact 同时支撑 A+B
 
 请严格按照以下结构输出：
 
@@ -97,15 +109,14 @@ def build_user_prompt(
     """构造 User Prompt"""
     from datetime import datetime
 
-    # 文章列表 - 提供更多正文内容
+    # Article metadata is a bibliography. Factual content comes from the Fact Pack.
     articles_text = ""
     for i, a in enumerate(articles[:10], 1):
-        text = truncate(a.get("full_text", "") or a.get("summary", ""), 800)
         articles_text += f"### {i}. {a['title']}\n"
         articles_text += f"- 来源: {a.get('source', '未知')}\n"
         articles_text += f"- 时间: {a.get('published_at', '未知')}\n"
         articles_text += f"- 链接: {a['url']}\n"
-        articles_text += f"- 正文: {text}\n\n"
+        articles_text += "- 说明: 仅用于来源目录；正文事实必须从下方事实证据包引用。\n\n"
 
     evidence_section = ""
     if fact_pack:
@@ -119,11 +130,18 @@ def build_user_prompt(
             warnings = quality_report.get("warnings", [])
             if warnings:
                 evidence_section += "- 风险提示: " + "；".join(warnings) + "\n"
-        evidence_section += "\n请优先使用以下事实作为文章骨架：\n"
-        for fact in fact_pack.get("facts", [])[:12]:
+        selected_facts = select_facts_for_prompt(fact_pack.get("facts", []))
+        evidence_section += (
+            f"\n以下是报告唯一允许使用的可验证事实（按 token 预算选入 {len(selected_facts)}/"
+            f"{len(fact_pack.get('facts', []))} 条，优先保留高风险信息和事件多样性）：\n"
+        )
+        for fact in selected_facts:
+            fact_id = fact.get("fact_id") or fact.get("id")
             evidence_section += (
-                f"- [{fact.get('id')}] {fact.get('claim')} "
-                f"来源: {fact.get('source_title')} ({fact.get('url')})\n"
+                f"- [{fact_id}] {fact.get('claim')} "
+                f"| 原文证据: {fact.get('source_span', fact.get('claim', ''))} "
+                f"| 事件: {fact.get('event_id', '')} "
+                f"| 来源: {fact.get('source_title')} ({fact.get('url')})\n"
             )
         evidence_section += "\n"
 
@@ -181,3 +199,61 @@ def build_memory_prompt(topic_name: str, articles: list) -> str:
   "sentiment": 0.0到1.0之间的情感分数（0=极度负面，1=极度正面）,
   "top_entities": ["实体1", "实体2", "实体3"]
 }}"""
+
+
+def select_facts_for_prompt(facts: list[dict], max_chars: int = 24000) -> list[dict]:
+    """Select complete evidence spans under a prompt budget without head truncation."""
+    by_event = defaultdict(list)
+    for index, fact in enumerate(facts):
+        event_id = fact.get("event_id") or f"ungrouped-{index}"
+        evidence = f"{fact.get('claim', '')} {fact.get('source_span', '')}"
+        risk = 3 if re.search(r"[%％$¥€£]|美元|欧元|英镑|亿元|million|billion|trillion", evidence, re.I) else (
+            2 if re.search(r"\d{4}[-/年]|表示|宣布|称|said|announced", evidence, re.I) else (
+                1 if re.search(r"\d", evidence) else 0
+            )
+        )
+        by_event[event_id].append((risk, float(fact.get("confidence", 0.0) or 0.0), -index, fact))
+    queues = [
+        [item[3] for item in sorted(items, key=lambda item: (item[0], item[1], item[2]), reverse=True)]
+        for _event, items in sorted(by_event.items())
+    ]
+    selected = []
+    used = 0
+    while any(queues):
+        made_progress = False
+        for queue in queues:
+            if not queue:
+                continue
+            fact = queue.pop(0)
+            size = len(fact.get("claim", "")) + len(fact.get("source_span", "")) + 180
+            if used + size <= max_chars or not selected:
+                selected.append(fact)
+                used += size
+                made_progress = True
+        if not made_progress:
+            break
+    return selected
+
+
+REPAIR_SYSTEM_PROMPT = """你是 NewsWeaver 的引用修复编辑。只修复给定 Markdown 报告，不添加新事实。
+你的唯一事实来源是 Fact Pack。删除无法支持的陈述，为可支持的关键事实添加准确 `[Fxxx]`，并确保数字、日期、金额、比例和直接归因逐项有证据。保留原有文章结构，只输出修复后的完整 Markdown。"""
+
+
+def build_repair_prompt(report: str, fact_pack: dict, audit: dict) -> str:
+    """Build a focused repair request from structured audit failures."""
+    compact_facts = [
+        {
+            "fact_id": fact.get("fact_id") or fact.get("id"),
+            "claim": fact.get("claim", ""),
+            "source_span": fact.get("source_span", fact.get("claim", "")),
+            "source": fact.get("source", ""),
+            "url": fact.get("url", ""),
+        }
+        for fact in fact_pack.get("facts", [])
+    ]
+    return (
+        "请根据审计失败原因修复报告。不得保留 Fact Pack 外事实，也不得让引用支撑其未包含的 claim。\n\n"
+        f"## 审计失败原因\n{json.dumps(audit.get('failure_reasons', []), ensure_ascii=False, indent=2)}\n\n"
+        f"## Fact Pack\n{json.dumps(compact_facts, ensure_ascii=False, indent=2)}\n\n"
+        f"## 待修复报告\n{report}"
+    )

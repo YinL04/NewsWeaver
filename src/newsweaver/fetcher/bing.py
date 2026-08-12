@@ -1,6 +1,6 @@
 """Bing News Search API 适配器（可选增强）"""
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import requests
 

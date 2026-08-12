@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from newsweaver.fetcher.base import Article
 from newsweaver.pipeline import (
+    build_event_clusters,
     build_fact_pack,
     build_quality_report,
     audit_report,
@@ -60,9 +61,24 @@ class PipelineTest(unittest.TestCase):
 
         self.assertEqual(facts["article_count"], 3)
         self.assertEqual(facts["source_count"], 3)
-        self.assertEqual(len(facts["facts"]), 3)
+        self.assertGreater(len(facts["facts"]), 3)
+        self.assertEqual(facts["schema_version"], 2)
+        first = facts["facts"][0]
+        self.assertEqual(first["id"], first["fact_id"])
+        self.assertTrue(first["article_id"].startswith("A"))
+        self.assertTrue(first["source_span"])
+        self.assertTrue(first["event_id"].startswith("E"))
+        self.assertIn("confidence", first)
+        self.assertIn("corroborating_sources", first)
         self.assertGreaterEqual(quality["score"], 50)
         self.assertTrue(quality["ready"])
+
+    def test_fact_pack_splits_multiple_numeric_claims_in_one_sentence(self):
+        articles = [article("Results", "https://example.com/results", full_text="Revenue grew 30%, profit reached 5 million dollars.")]
+        facts = build_fact_pack("Markets", articles)["facts"]
+        self.assertTrue(any("Revenue grew 30%" in fact["claim"] for fact in facts))
+        self.assertTrue(any("profit reached 5 million" in fact["claim"] for fact in facts))
+        self.assertTrue(all("Revenue grew 30%, profit reached 5 million dollars." in fact["source_span"] for fact in facts))
 
     def test_quality_gate_explains_blockers(self):
         articles = [article("Only item", "https://example.com/1", source="A", full_text="body")]
@@ -78,6 +94,46 @@ class PipelineTest(unittest.TestCase):
         self.assertFalse(audit["valid"])
         self.assertEqual(audit["invalid_ids"], ["F999"])
         self.assertTrue(audit["numeric_without_citation"])
+
+    def test_audit_report_checks_support_and_fact_pack_only_claims(self):
+        articles = [article("Product Y launch", "https://example.com/1", full_text="Company X announced Product Y on August 10.")]
+        facts = build_fact_pack("AI", articles)
+
+        passed = audit_report("Company X announced Product Y on August 10 [F001].", facts)
+        unsupported = audit_report("Company X acquired rival Z [F001].", facts)
+        uncited = audit_report("Company X announced Product Y.", facts)
+
+        self.assertTrue(passed["passed"])
+        self.assertFalse(unsupported["checks"]["citations_support_claims"]["passed"])
+        self.assertFalse(uncited["checks"]["fact_pack_only"]["passed"])
+
+    def test_same_source_different_events_do_not_cluster(self):
+        articles = [
+            article("Company X launches Product Y", "https://example.com/1", source="Reuters", summary="Company X unveiled Product Y."),
+            article("Central bank cuts interest rates", "https://example.com/2", source="Reuters", summary="The central bank reduced its policy rate."),
+        ]
+        self.assertEqual(len(build_event_clusters(articles)), 2)
+
+    def test_different_sources_same_event_cluster_together(self):
+        articles = [
+            article("Company X launches Product Y on August 10", "https://example.com/1", source="Reuters", summary="Company X announced Product Y on August 10."),
+            article("Product Y unveiled by Company X on August 10", "https://example.com/2", source="BBC", summary="Company X launched Product Y on August 10."),
+        ]
+        clusters = build_event_clusters(articles)
+        reversed_clusters = build_event_clusters(list(reversed(articles)))
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(clusters[0]["sources"], ["BBC", "Reuters"])
+        self.assertEqual(clusters[0]["event_id"], reversed_clusters[0]["event_id"])
+
+        facts = build_fact_pack("AI", articles, event_clusters=clusters)
+        self.assertTrue(any("BBC" in fact["corroborating_sources"] for fact in facts["facts"] if fact["source"] == "Reuters"))
+
+    def test_similar_titles_far_apart_do_not_cluster(self):
+        recent = article("Company X launches Product Y", "https://example.com/1", source="Reuters")
+        old = article("Company X launches Product Y", "https://example.com/2", source="AP")
+        recent.published_at = "2026-06-24T00:00:00+00:00"
+        old.published_at = "2026-06-10T00:00:00+00:00"
+        self.assertEqual(len(build_event_clusters([recent, old])), 2)
 
     @patch("newsweaver.pipeline.collect_articles")
     def test_prepare_articles_applies_required_words(self, collect):

@@ -39,6 +39,8 @@ DEFAULT_CONFIG = {
         "bing_api_key": "",
         "default_limit": 10,
         "days_back": 1,
+        "extraction_workers": 4,
+        "source_quality": {},
     },
     "topics": [],
 }

@@ -19,7 +19,8 @@ from urllib.parse import parse_qs, urlparse
 from . import __version__
 from .config import find_topic, load_config, save_config
 from .memory.trends import build_trend_cards
-from .pipeline import article_to_dict, audit_report, build_fact_pack, build_quality_report, prepare_articles
+from .evidence import finalize_audit
+from .pipeline import article_to_dict, audit_report, build_event_clusters, build_fact_pack, build_quality_report, prepare_articles
 from .utils import atomic_write_json, get_log_file, get_memory_dir, get_output_dir, log_exception, read_json
 
 
@@ -30,7 +31,7 @@ STATE_LOCK = threading.Lock()
 
 
 class NewsWeaverHandler(BaseHTTPRequestHandler):
-    server_version = "NewsWeaverWeb/1.2"
+    server_version = "NewsWeaverWeb/1.3"
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -203,16 +204,24 @@ class NewsWeaverHandler(BaseHTTPRequestHandler):
             raise ValueError("主题不存在")
         limit = int(body.get("limit") or config.get("search", {}).get("default_limit", 10))
         articles = prepare_articles(config, topic, limit)
-        facts = build_fact_pack(topic_name, articles)
+        clusters = build_event_clusters(articles)
+        facts = build_fact_pack(topic_name, articles, event_clusters=clusters)
         quality = enrich_quality_report(build_quality_report(topic_name, articles, facts))
         preview_id = uuid.uuid4().hex
         with STATE_LOCK:
-            PREVIEWS[preview_id] = {"topic": topic_name, "created": time.time(), "articles": articles}
+            PREVIEWS[preview_id] = {
+                "topic": topic_name,
+                "created": time.time(),
+                "articles": articles,
+                "facts": facts,
+                "clusters": clusters,
+            }
             _prune_state()
         self._json({
             "preview_id": preview_id,
             "quality": quality,
             "facts": facts,
+            "clusters": clusters,
             "articles": [article_to_dict(a, topic.get("keywords", [])) for a in articles],
         })
 
@@ -276,7 +285,7 @@ class NewsWeaverHandler(BaseHTTPRequestHandler):
             raise ValueError("报告内容不能为空")
         _snapshot_report(target)
         target.write_text(content, encoding="utf-8")
-        audit = audit_report(content, read_json(target.with_suffix(".facts.json")))
+        audit = finalize_audit(audit_report(content, read_json(target.with_suffix(".facts.json"))), 0)
         atomic_write_json(target.with_suffix(".audit.json"), audit)
         self._json({"ok": True, "audit": audit, "versions": _report_versions(target)})
 
@@ -305,7 +314,7 @@ class NewsWeaverHandler(BaseHTTPRequestHandler):
         _snapshot_report(target)
         updated = content.replace(section, rewritten.strip(), 1)
         target.write_text(updated, encoding="utf-8")
-        audit = audit_report(updated, facts)
+        audit = finalize_audit(audit_report(updated, facts), 0)
         atomic_write_json(target.with_suffix(".audit.json"), audit)
         self._json({"ok": True, "content": updated, "audit": audit, "versions": _report_versions(target)})
 
@@ -320,7 +329,7 @@ class NewsWeaverHandler(BaseHTTPRequestHandler):
         content = version.read_text(encoding="utf-8")
         target.write_text(content, encoding="utf-8")
         facts = read_json(target.with_suffix(".facts.json"))
-        audit = audit_report(content, facts)
+        audit = finalize_audit(audit_report(content, facts), 0)
         atomic_write_json(target.with_suffix(".audit.json"), audit)
         self._json({"ok": True, "content": content, "audit": audit, "versions": _report_versions(target)})
 
@@ -334,7 +343,22 @@ def _run_generation_job(job_id: str, config: dict, topic: dict, model: str, arti
     try:
         JOBS[job_id].update({"status": "running", "percent": 5, "message": "任务已启动"})
         path = run_generate(config, topic, model, len(articles), prepared_articles=articles, force=force, progress=progress)
-        JOBS[job_id].update({"status": "complete", "stage": "complete", "percent": 100, "message": "报告已完成", "report": path.name})
+        audit_status = read_json(path.with_suffix(".audit.json")).get("status", "needs_review")
+        message = {
+            "pass": "报告已生成并通过审计",
+            "repaired": "报告经自动修复后通过审计",
+            "needs_review": "草稿已保存，需要人工复核",
+        }.get(audit_status, "报告已完成")
+        JOBS[job_id].update(
+            {
+                "status": "complete",
+                "stage": "complete",
+                "percent": 100,
+                "message": message,
+                "report": path.name,
+                "audit_status": audit_status,
+            }
+        )
     except Exception as exc:
         log_exception(f"generation job {job_id}", exc)
         JOBS[job_id].update({"status": "failed", "message": str(exc), "error": str(exc)})

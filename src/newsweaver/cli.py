@@ -61,3 +61,7 @@ main.add_command(schedule_group)
 main.add_command(publish_cmd)
 main.add_command(web_cmd)
 main.add_command(interactive_cmd)
+
+
+if __name__ == "__main__":
+    main()

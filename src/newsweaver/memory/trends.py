@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 
+from ..clustering import extract_named_entities, jaccard, text_tokens
 from ..pipeline import first_sentence
 from .store import MemoryStore
 
@@ -33,22 +35,10 @@ def build_structured_recent_entry(
     quality_report: dict | None = None,
     report_text: str = "",
 ) -> dict:
-    """Create an L2 memory entry with events/entities/metrics/judgments."""
+    """Create an L2 entry with events, claims, entities, metrics, and judgments."""
     now = datetime.now(timezone.utc)
     facts = (fact_pack or {}).get("facts", [])
-    events = []
-    for index, article in enumerate(articles[:12], 1):
-        evidence = article.get("full_text") or article.get("summary") or article.get("title", "")
-        events.append(
-            {
-                "id": f"E{index:03d}",
-                "title": article.get("title", ""),
-                "source": article.get("source", ""),
-                "url": article.get("url", ""),
-                "published_at": article.get("published_at", ""),
-                "evidence": first_sentence(evidence),
-            }
-        )
+    events = _memory_events(articles, facts)
 
     text_blob = "\n".join(
         [
@@ -66,9 +56,28 @@ def build_structured_recent_entry(
     entities = extract_entities(text_blob, topic_name)
     metrics = extract_metrics(text_blob, articles)
     judgments = build_judgments(topic_name, events, facts, quality_report or {})
+    claims = [
+        {
+            "claim_id": _memory_claim_id(fact, index),
+            "fact_id": fact.get("fact_id") or fact.get("id") or f"F{index:03d}",
+            "claim": fact.get("claim", ""),
+            "source_span": fact.get("source_span", fact.get("claim", "")),
+            "event_id": fact.get("event_id", ""),
+            "article_id": fact.get("article_id", ""),
+            "source": fact.get("source", ""),
+            "url": fact.get("url", ""),
+            "confidence": fact.get("confidence", 0.6),
+            "corroborating_sources": fact.get("corroborating_sources", []),
+            "status": "corroborated" if fact.get("corroborating_sources") else "new",
+            "observed_at": now.isoformat(),
+            "relationships": [],
+        }
+        for index, fact in enumerate(facts, 1)
+        if fact.get("claim")
+    ]
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "date": now.strftime("%Y-%m-%d"),
         "generated_at": now.isoformat(),
         "topic": topic_name,
@@ -76,6 +85,7 @@ def build_structured_recent_entry(
         "sentiment": estimate_sentiment(text_blob),
         "top_entities": [entity["name"] for entity in entities[:5]],
         "events": events,
+        "claims": claims,
         "entities": entities[:20],
         "metrics": metrics[:20],
         "judgments": judgments[:8],
@@ -90,10 +100,22 @@ def add_structured_recent_memory(
     fact_pack: dict | None = None,
     quality_report: dict | None = None,
     report_text: str = "",
-) -> dict:
+    audit_report: dict | None = None,
+) -> dict | None:
+    """Persist an entry only when the report passed the evidence audit."""
+    from ..evidence import audit_allows_memory
+
+    if not audit_allows_memory(audit_report):
+        return None
     store = MemoryStore(topic_name)
+    data = store.load()
     entry = build_structured_recent_entry(topic_name, articles, fact_pack, quality_report, report_text)
-    store.add_recent_entry(entry)
+    update_claim_lifecycle(data, entry)
+    data.setdefault("recent", []).append(entry)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
+    data["recent"] = [item for item in data["recent"] if item.get("date", "") >= cutoff][-90:]
+    data["schema_version"] = 3
+    store.save(data)
     auto_compact_memory(topic_name)
     return entry
 
@@ -177,6 +199,8 @@ def aggregate_week(topic_name: str, week_start: str, entries: list[dict]) -> dic
     judgments = []
     sentiments = []
     sources: Counter[str] = Counter()
+    claim_statuses: Counter[str] = Counter()
+    lifecycle_claims = []
 
     for entry in entries:
         sentiments.append(float(entry.get("sentiment", 0.5)))
@@ -189,13 +213,16 @@ def aggregate_week(topic_name: str, week_start: str, entries: list[dict]) -> dic
                 sources[event["source"]] += 1
         metrics.extend(entry.get("metrics", []))
         judgments.extend(entry.get("judgments", []))
+        for claim in entry.get("claims", []):
+            claim_statuses[claim.get("status", "new")] += 1
+            lifecycle_claims.append(claim)
 
     top_entities = [{"name": name, "mentions": count} for name, count in entity_counter.most_common(10)]
     recurring_players = [item["name"] for item in top_entities[:6]]
     turning_points = infer_turning_points(event_titles, metrics, judgments)
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "topic": topic_name,
         "week_start": week_start,
         "week_end": (parse_date(week_start) + timedelta(days=6)).isoformat(),
@@ -211,6 +238,8 @@ def aggregate_week(topic_name: str, week_start: str, entries: list[dict]) -> dic
         "judgments": judgments[:12],
         "sources": dict(sources),
         "sample_events": event_titles[:8],
+        "claim_statuses": dict(claim_statuses),
+        "claim_changes": lifecycle_claims[:20],
     }
 
 
@@ -227,6 +256,7 @@ def merge_week(existing: dict | None, new: dict) -> dict:
                 "entities": item.get("entities", []),
                 "metrics": item.get("metrics", []),
                 "judgments": item.get("judgments", []),
+                "claims": item.get("claim_changes", []),
             }
         )
     return aggregate_week(new.get("topic", existing.get("topic", "")), new["week_start"], proxy_entries)
@@ -241,6 +271,7 @@ def build_trend_cards(topic_name: str) -> dict:
     recent_events = []
     recent_metrics = []
     recent_judgments = []
+    recent_claims = []
 
     for entry in recent[-14:]:
         for entity in entry.get("entities", []):
@@ -248,11 +279,16 @@ def build_trend_cards(topic_name: str) -> dict:
         recent_events.extend([event.get("title", "") for event in entry.get("events", []) if event.get("title")])
         recent_metrics.extend(entry.get("metrics", []))
         recent_judgments.extend(entry.get("judgments", []))
+        recent_claims.extend(entry.get("claims", []))
 
     latest_week = long_term[-1] if long_term else {}
     previous_week = long_term[-2] if len(long_term) > 1 else {}
     latest_players = set(latest_week.get("recurring_players", []))
     previous_players = set(previous_week.get("recurring_players", []))
+
+    lifecycle = defaultdict(list)
+    for claim in recent_claims:
+        lifecycle[claim.get("status", "new")].append(claim.get("claim", ""))
 
     return {
         "topic": topic_name,
@@ -277,6 +313,12 @@ def build_trend_cards(topic_name: str) -> dict:
         "trend_conclusion": latest_week.get("trend_conclusion") or build_weekly_conclusion([name for name, _ in recent_entities.most_common(5)], recent_events),
         "metrics": summarize_metrics(recent_metrics)[:8] or latest_week.get("metrics", [])[:8],
         "judgments": recent_judgments[:8] or latest_week.get("judgments", [])[:8],
+        "claim_lifecycle": {status: values[:8] for status, values in lifecycle.items()},
+        "what_is_new": lifecycle.get("new", [])[:8],
+        "what_was_confirmed": lifecycle.get("corroborated", [])[:8],
+        "what_was_contradicted": lifecycle.get("disputed", [])[:8],
+        "what_was_fulfilled": lifecycle.get("fulfilled", [])[:8],
+        "what_became_outdated": (lifecycle.get("superseded", []) + lifecycle.get("expired", []))[:8],
     }
 
 
@@ -305,6 +347,19 @@ def format_trend_cards(cards: dict) -> str:
     lines.extend([f"- {m.get('name')}: {m.get('value')} {m.get('unit')}（{m.get('context', '')}）" for m in cards.get("metrics", [])] or ["- 暂无可结构化指标。"])
     lines.extend(["", "## 可用判断"])
     lines.extend([f"- {j.get('claim')}（置信度 {j.get('confidence', 'medium')}）" for j in cards.get("judgments", [])] or ["- 暂无判断。"])
+    lines.extend(["", "## Claim 生命周期"])
+    lifecycle_labels = {
+        "new": "新事实",
+        "corroborated": "已佐证",
+        "disputed": "有争议",
+        "superseded": "已被更新",
+        "fulfilled": "已兑现",
+        "expired": "已过期",
+    }
+    lifecycle = cards.get("claim_lifecycle", {})
+    for status, label in lifecycle_labels.items():
+        values = lifecycle.get(status, [])
+        lines.append(f"- {label}：{'；'.join(values[:3]) or '暂无'}")
     return "\n".join(lines).strip() + "\n"
 
 
@@ -321,6 +376,10 @@ def render_memory_for_prompt(memory_data: dict) -> str:
             events = "；".join(event.get("title", "") for event in entry.get("events", [])[:3])
             entities = ", ".join(entity.get("name", "") for entity in entry.get("entities", [])[:5])
             judgments = "；".join(judgment.get("claim", "") for judgment in entry.get("judgments", [])[:2])
+            claims = "；".join(
+                f"[{claim.get('status', 'new')}] {claim.get('claim', '')}"
+                for claim in entry.get("claims", [])[:4]
+            )
             lines.append(f"- {entry.get('date')}: {entry.get('summary', '')}")
             if events:
                 lines.append(f"  事件：{events}")
@@ -328,6 +387,8 @@ def render_memory_for_prompt(memory_data: dict) -> str:
                 lines.append(f"  高频实体：{entities}")
             if judgments:
                 lines.append(f"  历史判断：{judgments}")
+            if claims:
+                lines.append(f"  Claim 演变：{claims}")
     if long_term:
         lines.extend(["", "### 周趋势"])
         for week in long_term[-4:]:
@@ -463,6 +524,134 @@ def estimate_sentiment(text: str) -> float:
     negative = sum(text.count(word) for word in ["下滑", "亏损", "裁员", "监管", "风险", "失败", "下降", "危机"])
     score = 0.5 + (positive - negative) * 0.03
     return round(max(0.0, min(1.0, score)), 2)
+
+
+def update_claim_lifecycle(memory_data: dict, new_entry: dict, expiration_days: int = 90) -> None:
+    """Update prior and current claim states using deterministic lifecycle rules."""
+    now = datetime.now(timezone.utc)
+    prior_claims = []
+    for entry in memory_data.get("recent", []):
+        for claim in entry.get("claims", []):
+            observed = _parse_datetime(claim.get("observed_at")) or _parse_datetime(entry.get("date"))
+            if observed and now - observed > timedelta(days=expiration_days) and claim.get("status") not in {"fulfilled", "superseded", "disputed"}:
+                claim["status"] = "expired"
+            prior_claims.append(claim)
+
+    for current in new_entry.get("claims", []):
+        best = None
+        best_score = 0.0
+        for prior in prior_claims:
+            score = lifecycle_similarity(prior.get("claim", ""), current.get("claim", ""))
+            if score > best_score:
+                best, best_score = prior, score
+        if not best or best_score < 0.28:
+            continue
+        if _claims_contradict(best.get("claim", ""), current.get("claim", "")):
+            best["status"] = "disputed"
+            current["status"] = "disputed"
+            _relate(best, current, "contradicts")
+        elif _claim_fulfills(best.get("claim", ""), current.get("claim", "")):
+            best["status"] = "fulfilled"
+            _relate(best, current, "fulfills")
+        elif _claim_supersedes(best.get("claim", ""), current.get("claim", ""), best_score):
+            best["status"] = "superseded"
+            _relate(best, current, "supersedes")
+        elif best_score >= 0.48:
+            best["status"] = "corroborated"
+            current["status"] = "corroborated"
+            _relate(best, current, "corroborates")
+
+
+def lifecycle_similarity(left: str, right: str) -> float:
+    token_score = jaccard(text_tokens(left), text_tokens(right))
+    entity_score = jaccard(extract_named_entities(left), extract_named_entities(right))
+    return 0.78 * token_score + 0.22 * entity_score
+
+
+def _claims_contradict(left: str, right: str) -> bool:
+    negative = ("not", "no longer", "denied", "cancelled", "canceled", "未", "没有", "否认", "取消", "不再")
+    return any(token in left.lower() for token in negative) != any(token in right.lower() for token in negative)
+
+
+def _claim_fulfills(left: str, right: str) -> bool:
+    plan_words = ("plan", "plans", "planned", "will", "expects", "计划", "预计", "将于", "拟")
+    completion_words = ("launched", "released", "completed", "fulfilled", "已发布", "正式发布", "已完成", "兑现")
+    return any(word in left.lower() for word in plan_words) and any(word in right.lower() for word in completion_words)
+
+
+def _claim_supersedes(left: str, right: str, similarity: float) -> bool:
+    left_numbers = set(re.findall(r"\d+(?:\.\d+)?", left))
+    right_numbers = set(re.findall(r"\d+(?:\.\d+)?", right))
+    update_words = ("updated", "revised", "replaced", "最新", "更新", "修订", "取代")
+    return similarity >= 0.38 and (
+        bool(left_numbers and right_numbers and left_numbers != right_numbers)
+        or any(word in right.lower() for word in update_words)
+    )
+
+
+def _relate(prior: dict, current: dict, relation: str) -> None:
+    prior.setdefault("relationships", []).append({"type": relation, "claim_id": current.get("claim_id", "")})
+    current.setdefault("relationships", []).append({"type": relation, "claim_id": prior.get("claim_id", "")})
+
+
+def _parse_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+    except ValueError:
+        return None
+
+
+def _memory_events(articles: list[dict], facts: list[dict]) -> list[dict]:
+    article_by_id = {article.get("article_id"): article for article in articles if article.get("article_id")}
+    by_event = defaultdict(list)
+    for fact in facts:
+        if fact.get("event_id"):
+            by_event[fact["event_id"]].append(fact)
+    if by_event:
+        events = []
+        for event_id, event_facts in by_event.items():
+            linked_articles = [article_by_id.get(fact.get("article_id")) for fact in event_facts]
+            linked_articles = [article for article in linked_articles if article]
+            representative = linked_articles[0] if linked_articles else {}
+            events.append(
+                {
+                    "id": event_id,
+                    "event_id": event_id,
+                    "title": representative.get("title") or event_facts[0].get("source_title", ""),
+                    "sources": sorted({fact.get("source", "") for fact in event_facts if fact.get("source")}),
+                    "source": representative.get("source") or event_facts[0].get("source", ""),
+                    "url": representative.get("url") or event_facts[0].get("url", ""),
+                    "published_at": representative.get("published_at") or event_facts[0].get("published_at", ""),
+                    "evidence": event_facts[0].get("source_span") or event_facts[0].get("claim", ""),
+                    "claim_count": len(event_facts),
+                }
+            )
+        return events[:12]
+    events = []
+    for index, article in enumerate(articles[:12], 1):
+        evidence = article.get("full_text") or article.get("summary") or article.get("title", "")
+        events.append(
+            {
+                "id": f"E{index:03d}",
+                "event_id": f"E{index:03d}",
+                "title": article.get("title", ""),
+                "source": article.get("source", ""),
+                "url": article.get("url", ""),
+                "published_at": article.get("published_at", ""),
+                "evidence": first_sentence(evidence),
+            }
+        )
+    return events
+
+
+def _memory_claim_id(fact: dict, index: int) -> str:
+    identity = f"{fact.get('event_id', '')}|{fact.get('claim', '')}|{fact.get('article_id', '')}"
+    if identity.strip("|"):
+        return "C" + hashlib.sha1(identity.encode("utf-8")).hexdigest()[:12].upper()
+    return f"C{index:03d}"
 
 
 def parse_date(value: str | None):

@@ -7,7 +7,12 @@ import click
 
 from .exporter import export_report_bundle
 from .llm.client import LLMClient
-from .llm.prompts import build_user_prompt, SYSTEM_PROMPT
+from .llm.prompts import (
+    REPAIR_SYSTEM_PROMPT,
+    SYSTEM_PROMPT,
+    build_repair_prompt,
+    build_user_prompt,
+)
 from .memory.store import MemoryStore
 from .memory.trends import add_structured_recent_memory, auto_compact_memory, render_memory_for_prompt
 from .pipeline import (
@@ -21,7 +26,8 @@ from .pipeline import (
     rank_articles,
     write_artifacts,
 )
-from .utils import atomic_write_json, get_output_dir, logger
+from .evidence import audit_allows_memory, finalize_audit
+from .utils import atomic_write_json, get_output_dir
 
 
 class QualityGateError(RuntimeError):
@@ -39,7 +45,7 @@ def run_generate(
     force: bool = False,
     progress=None,
 ) -> Path:
-    """执行完整的生成流程：fetch → 读记忆 → LLM → 输出 → 更新记忆"""
+    """执行完整流程：fetch → evidence → generate → audit/repair → save → memory。"""
     topic_name = topic_obj["name"]
 
     # ── 1. 采集新闻 ──
@@ -49,10 +55,14 @@ def run_generate(
     if not articles:
         raise RuntimeError("未找到任何文章")
 
-    articles = rank_articles(dedupe_articles(articles), topic_obj.get("keywords", []))[:limit]
-    fact_pack = build_fact_pack(topic_name, articles)
-    quality_report = build_quality_report(topic_name, articles, fact_pack)
+    articles = rank_articles(
+        dedupe_articles(articles),
+        topic_obj.get("keywords", []),
+        source_quality=config.get("search", {}).get("source_quality"),
+    )[:limit]
     event_clusters = build_event_clusters(articles)
+    fact_pack = build_fact_pack(topic_name, articles, event_clusters=event_clusters)
+    quality_report = build_quality_report(topic_name, articles, fact_pack)
     click.echo(
         f">>> 质量评分: {quality_report['score']}/100 "
         f"({quality_report['article_count']} 篇, {quality_report['source_count']} 个来源)"
@@ -97,7 +107,7 @@ def run_generate(
 
     report = llm.generate(SYSTEM_PROMPT, user_prompt, model=model)
     notify("audit", 88, "正在检查引用与数字陈述")
-    audit = audit_report(report, fact_pack)
+    report, audit = audit_and_repair_report(llm, report, fact_pack, model=model, max_repairs=2, progress=notify)
 
     # ── 4. 保存输出 ──
     today = datetime.now().strftime("%Y-%m-%d")
@@ -119,11 +129,27 @@ def run_generate(
     click.echo(report[:1000] + ("..." if len(report) > 1000 else ""))
     click.echo(f"{'='*50}\n")
 
-    # ── 5. 更新 L2 记忆 ──
-    click.echo(">>> 更新记忆...")
-    add_structured_recent_memory(topic_name, articles_dicts, fact_pack, quality_report, report)
-    click.echo(">>> 结构化记忆已更新")
-    notify("complete", 100, "报告已生成并完成引用审计")
+    # ── 5. 仅让审计通过的事实进入长期记忆 ──
+    if audit_allows_memory(audit):
+        click.echo(">>> 更新记忆...")
+        add_structured_recent_memory(
+            topic_name,
+            articles_dicts,
+            fact_pack,
+            quality_report,
+            report,
+            audit_report=audit,
+        )
+        click.echo(">>> 结构化记忆已更新")
+    else:
+        click.echo(">>> 引用审计仍未通过：草稿已保存，未写入趋势记忆")
+    notify(
+        "complete",
+        100,
+        "报告已修复并通过审计" if audit.get("status") == "repaired" else (
+            "报告已生成并通过审计" if audit.get("status") == "pass" else "草稿需要人工复核，未更新记忆"
+        ),
+    )
 
     return out_file
 
@@ -133,3 +159,50 @@ def _fetch_articles(config: dict, topic_obj: dict, limit: int, progress=None) ->
     articles = prepare_articles(config, topic_obj, limit, progress=progress)
     click.echo(f">>> 找到 {len(articles)} 篇文章")
     return articles
+
+
+def audit_and_repair_report(
+    llm,
+    report: str,
+    fact_pack: dict,
+    model: str | None = None,
+    max_repairs: int = 2,
+    progress=None,
+) -> tuple[str, dict]:
+    """Audit, repair at most twice, and audit after every repair."""
+    notify = progress or (lambda _stage, _percent, _message: None)
+    history = []
+    repair_attempts = 0
+    current = report
+    while True:
+        audit = audit_report(current, fact_pack)
+        history.append(
+            {
+                "attempt": repair_attempts,
+                "status": audit.get("status"),
+                "passed": audit.get("passed", False),
+                "failure_reasons": audit.get("failure_reasons", []),
+            }
+        )
+        if audit.get("passed") or repair_attempts >= max_repairs:
+            return current, finalize_audit(audit, repair_attempts, history)
+        repair_attempts += 1
+        notify("repair", 88 + min(8, repair_attempts * 3), f"引用审计失败，正在自动修复 {repair_attempts}/{max_repairs}")
+        try:
+            current = llm.generate(
+                REPAIR_SYSTEM_PROMPT,
+                build_repair_prompt(current, fact_pack, audit),
+                model=model,
+            )
+        except Exception as exc:
+            audit = dict(audit)
+            failure = {
+                "code": "repair_call_failed",
+                "message": "自动修复调用失败，保留原草稿供人工复核",
+                "items": [str(exc)],
+            }
+            audit["failure_reasons"] = [*audit.get("failure_reasons", []), failure]
+            audit["warnings"] = [*audit.get("warnings", []), failure["message"]]
+            audit["passed"] = False
+            audit["valid"] = False
+            return current, finalize_audit(audit, repair_attempts, history)

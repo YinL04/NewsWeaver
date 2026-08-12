@@ -8,10 +8,10 @@ from pathlib import Path
 
 import click
 
-from .config import load_config, save_config, set_nested, get_nested, find_topic
+from .config import find_topic, load_config, save_config, set_nested
 from .pipeline import article_to_dict, build_fact_pack, build_quality_report, collect_articles
 from .templates import get_topic_template, list_topic_templates
-from .utils import get_output_dir, logger
+from .utils import get_output_dir
 
 
 REQUIRED_PACKAGES = [

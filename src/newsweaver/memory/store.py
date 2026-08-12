@@ -1,8 +1,6 @@
 """记忆存储引擎：L2/L3 JSON 读写"""
 
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
-
 from ..utils import get_memory_dir, atomic_write_json, read_json, logger
 
 
@@ -17,14 +15,14 @@ class MemoryStore:
         data = read_json(self.file_path)
         if not data:
             data = {
-                "schema_version": 2,
+                "schema_version": 3,
                 "topic": self.topic_name,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "recent": [],
                 "long_term": [],
             }
-        data.setdefault("schema_version", 2)
+        data["schema_version"] = max(3, int(data.get("schema_version", 1) or 1))
         data.setdefault("recent", [])
         data.setdefault("long_term", [])
         return data

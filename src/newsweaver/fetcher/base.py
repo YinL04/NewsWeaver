@@ -13,6 +13,7 @@ class Article:
     summary: str = ""
     full_text: str = ""
     language: str = "zh"
+    metadata: dict = field(default_factory=dict)
 
 
 class BaseFetcher(ABC):

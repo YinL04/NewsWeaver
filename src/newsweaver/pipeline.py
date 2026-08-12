@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .fetcher.base import Article
-from .utils import atomic_write_json
+from .utils import atomic_write_json, logger
 
 
 TRACKING_PARAMS = {
@@ -68,7 +68,11 @@ def collect_articles(config: dict, topic_obj: dict, limit: int | None = None) ->
             )
         )
 
-    return rank_articles(dedupe_articles(articles), topic_obj.get("keywords", []))[:limit]
+    return rank_articles(
+        dedupe_articles(articles),
+        topic_obj.get("keywords", []),
+        source_quality=search_config.get("source_quality"),
+    )[:limit]
 
 
 def prepare_articles(
@@ -82,12 +86,46 @@ def prepare_articles(
     notify("collect", 10, "正在采集资讯源")
     articles = collect_articles(config, topic_obj, limit)
     notify("extract", 28, f"正在提取 {len(articles)} 篇正文")
-    total = max(1, len(articles))
-    for index, article in enumerate(articles, 1):
-        if not article.full_text or article.full_text == article.summary:
-            from .extractor import extract_article
-            article.full_text = extract_article(article.url) or article.summary
-        notify("extract", 28 + int(index / total * 27), f"正文提取 {index}/{len(articles)}")
+    targets = [article for article in articles if not article.full_text or article.full_text == article.summary]
+    total = max(1, len(targets))
+    if targets:
+        from .extractor import extract_article_detailed
+
+        workers = max(1, min(int(config.get("search", {}).get("extraction_workers", 4)), 8, len(targets)))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="newsweaver-extract") as executor:
+            futures = {executor.submit(extract_article_detailed, article.url): article for article in targets}
+            for index, future in enumerate(as_completed(futures), 1):
+                article = futures[future]
+                try:
+                    result = future.result()
+                    article.full_text = result.text or article.summary
+                    article.metadata["extraction"] = result.metadata
+                    canonical_url = result.metadata.get("canonical_url")
+                    if canonical_url:
+                        article.url = canonical_url
+                except Exception as exc:
+                    article.full_text = article.summary
+                    article.metadata["extraction"] = {
+                        "status": "failed",
+                        "method": "none",
+                        "content_length": 0,
+                        "cached": False,
+                        "error": str(exc),
+                    }
+                    logger.warning(f"正文提取失败，已降级为摘要 {article.url}: {exc}")
+                notify("extract", 28 + int(index / total * 27), f"正文提取 {index}/{len(targets)}")
+    for article in articles:
+        if article not in targets:
+            article.metadata.setdefault(
+                "extraction",
+                {
+                    "status": "success",
+                    "method": "provided",
+                    "content_length": len(article.full_text),
+                    "cached": False,
+                    "canonical_url": article.url,
+                },
+            )
 
     required = [word.lower() for word in topic_obj.get("required_words", []) if word]
     if required:
@@ -96,7 +134,11 @@ def prepare_articles(
             if all(word in f"{article.title} {article.summary} {article.full_text}".lower() for word in required)
         ]
     notify("analyze", 60, "正在去重、排序并构建证据")
-    return rank_articles(dedupe_articles(articles), topic_obj.get("keywords", []))[: limit or 10]
+    return rank_articles(
+        dedupe_articles(articles),
+        topic_obj.get("keywords", []),
+        source_quality=config.get("search", {}).get("source_quality"),
+    )[: limit or 10]
 
 
 def normalize_url(url: str) -> str:
@@ -163,19 +205,22 @@ def relevance_score(article: Article, keywords: list[str]) -> int:
     return score
 
 
-def rank_articles(articles: list[Article], keywords: list[str]) -> list[Article]:
-    return sorted(
-        articles,
-        key=lambda article: (
-            relevance_score(article, keywords),
-            article.published_at or "",
-        ),
-        reverse=True,
-    )
+def rank_articles(
+    articles: list[Article],
+    keywords: list[str],
+    strategy=None,
+    source_quality: dict[str, float] | None = None,
+) -> list[Article]:
+    from .ranking import rank_articles as rank_diverse_articles
+
+    return rank_diverse_articles(articles, keywords, strategy=strategy, source_quality=source_quality)
 
 
 def article_to_dict(article: Article, keywords: list[str] | None = None) -> dict:
+    from .clustering import article_id
+
     return {
+        "article_id": article_id(article),
         "title": article.title,
         "url": article.url,
         "normalized_url": normalize_url(article.url),
@@ -185,34 +230,16 @@ def article_to_dict(article: Article, keywords: list[str] | None = None) -> dict
         "full_text": article.full_text,
         "language": article.language,
         "relevance_score": relevance_score(article, keywords or []),
+        "ranking": article.metadata.get("ranking", {}),
+        "extraction": article.metadata.get("extraction", {}),
     }
 
 
-def build_fact_pack(topic_name: str, articles: list[Article]) -> dict:
-    """Build a source-backed evidence package for the generated report."""
-    facts = []
-    source_counts = Counter(a.source for a in articles if a.source)
-    for index, article in enumerate(articles, 1):
-        evidence_text = first_sentence(article.full_text or article.summary or article.title)
-        facts.append(
-            {
-                "id": f"F{index:03d}",
-                "claim": evidence_text,
-                "source_title": article.title,
-                "source": article.source,
-                "url": article.url,
-                "published_at": article.published_at,
-            }
-        )
+def build_fact_pack(topic_name: str, articles: list[Article], event_clusters: list[dict] | None = None) -> dict:
+    """Build a claim-level fact pack while preserving the v1 public API."""
+    from .evidence import build_fact_pack as build_claim_fact_pack
 
-    return {
-        "topic": topic_name,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "article_count": len(articles),
-        "source_count": len(source_counts),
-        "sources": dict(source_counts),
-        "facts": facts,
-    }
+    return build_claim_fact_pack(topic_name, articles, event_clusters=event_clusters)
 
 
 def build_quality_report(topic_name: str, articles: list[Article], facts: dict) -> dict:
@@ -260,50 +287,17 @@ def build_quality_report(topic_name: str, articles: list[Article], facts: dict) 
 
 
 def audit_report(report: str, facts: dict) -> dict:
-    """Check citation validity and flag numeric claims without an evidence id."""
-    valid_ids = {fact.get("id") for fact in facts.get("facts", []) if fact.get("id")}
-    cited = set(re.findall(r"\[(F\d{3})\]", report or ""))
-    invalid = sorted(cited - valid_ids)
-    numeric_without_citation = []
-    for raw in (report or "").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or line.startswith("- ["):
-            continue
-        if re.search(r"\d+(?:\.\d+)?(?:%|％|亿|万|美元|元|人|家|款|倍)", line) and not re.search(r"\[F\d{3}\]", line):
-            numeric_without_citation.append(line[:180])
-    coverage = round(len(cited & valid_ids) / max(1, len(valid_ids)) * 100)
-    warnings = []
-    if invalid:
-        warnings.append("存在无效证据编号")
-    if numeric_without_citation:
-        warnings.append("存在未标注证据的数字陈述")
-    if coverage < 50 and valid_ids:
-        warnings.append("证据引用覆盖率偏低")
-    return {
-        "valid": not invalid and not numeric_without_citation,
-        "citation_coverage": coverage,
-        "cited_ids": sorted(cited & valid_ids),
-        "invalid_ids": invalid,
-        "numeric_without_citation": numeric_without_citation[:12],
-        "warnings": warnings,
-    }
+    """Audit citations and factual support with a structured v2 result."""
+    from .evidence import audit_report as audit_claim_report
+
+    return audit_claim_report(report, facts)
 
 
-def build_event_clusters(articles: list[Article]) -> list[dict]:
-    """Create lightweight event clusters using shared source and title terms."""
-    clusters: dict[str, list[Article]] = defaultdict(list)
-    for article in articles:
-        key = article.source or first_token(article.title) or "general"
-        clusters[key].append(article)
+def build_event_clusters(articles: list[Article], clusterer=None) -> list[dict]:
+    """Build cross-source event clusters through the pluggable clustering API."""
+    from .clustering import build_event_clusters as cluster_events
 
-    return [
-        {
-            "cluster": key,
-            "article_count": len(group),
-            "titles": [article.title for article in group[:5]],
-        }
-        for key, group in sorted(clusters.items(), key=lambda item: len(item[1]), reverse=True)
-    ]
+    return cluster_events(articles, clusterer=clusterer)
 
 
 def write_artifacts(base_path: Path, facts: dict, quality: dict, clusters: list[dict]) -> dict:

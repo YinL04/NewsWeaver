@@ -1,0 +1,85 @@
+{
+  "name": "synthetic-cross-source-baseline-v1",
+  "articles": [
+    {
+      "title": "Company X launches Product Y on August 10",
+      "url": "https://reuters.example/product-y",
+      "source": "Reuters",
+      "published_at": "2026-08-10T08:00:00+00:00",
+      "summary": "Company X launched Product Y on August 10.",
+      "full_text": "Company X launched Product Y on August 10.",
+      "extraction": {"status": "success", "method": "fixture", "content_length": 42, "cached": true}
+    },
+    {
+      "title": "Product Y unveiled by Company X on August 10",
+      "url": "https://bbc.example/product-y",
+      "source": "BBC",
+      "published_at": "2026-08-10T09:00:00+00:00",
+      "summary": "Company X launched Product Y on August 10.",
+      "full_text": "Company X launched Product Y on August 10.",
+      "extraction": {"status": "success", "method": "fixture", "content_length": 42, "cached": true}
+    },
+    {
+      "title": "Regulator approves AI safety rules",
+      "url": "https://ap.example/ai-rules",
+      "source": "AP",
+      "published_at": "2026-08-10T10:00:00+00:00",
+      "summary": "The regulator approved AI safety rules on August 10.",
+      "full_text": "The regulator approved AI safety rules on August 10.",
+      "extraction": {"status": "success", "method": "fixture", "content_length": 52, "cached": false}
+    }
+  ],
+  "selected_urls": [
+    "https://reuters.example/product-y",
+    "https://bbc.example/product-y",
+    "https://ap.example/ai-rules"
+  ],
+  "important_event_urls": [
+    "https://reuters.example/product-y",
+    "https://ap.example/ai-rules"
+  ],
+  "fact_pack": {
+    "schema_version": 2,
+    "facts": [
+      {
+        "id": "F001",
+        "fact_id": "F001",
+        "claim": "Company X launched Product Y on August 10.",
+        "source_span": "Company X launched Product Y on August 10.",
+        "source": "Reuters",
+        "url": "https://reuters.example/product-y",
+        "event_id": "ELAUNCH"
+      },
+      {
+        "id": "F002",
+        "fact_id": "F002",
+        "claim": "Company X launched Product Y on August 10.",
+        "source_span": "Company X launched Product Y on August 10.",
+        "source": "BBC",
+        "url": "https://bbc.example/product-y",
+        "event_id": "ELAUNCH"
+      },
+      {
+        "id": "F003",
+        "fact_id": "F003",
+        "claim": "The regulator approved AI safety rules on August 10.",
+        "source_span": "The regulator approved AI safety rules on August 10.",
+        "source": "AP",
+        "url": "https://ap.example/ai-rules",
+        "event_id": "ERULES"
+      }
+    ]
+  },
+  "report": "# AI evidence report\n\nCompany X launched Product Y on August 10 [F001] [F002].\n\nThe regulator approved AI safety rules on August 10 [F003].",
+  "trend_claims": [
+    {"claim": "Company X launched Product Y.", "status": "corroborated", "relationships": [{"type": "corroborates", "claim_id": "prior-1"}]},
+    {"claim": "The regulator approved AI safety rules.", "status": "new", "relationships": []}
+  ],
+  "usage": {
+    "input_tokens": 900,
+    "output_tokens": 180,
+    "input_cost_per_million": 0.15,
+    "output_cost_per_million": 0.60,
+    "latency_seconds": 1.25
+  }
+}

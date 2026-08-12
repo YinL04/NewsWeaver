@@ -1,825 +1,362 @@
-# NewsWeaver - 可定制 AI 资讯 Agent
+# NewsWeaver
 
-> 自动采集、分析、生成新闻报道的 CLI 工具。基于 RSS 订阅源采集新闻，使用 LLM 生成自媒体风格的深度报道，支持三层记忆机制追踪行业趋势。
+> 一个 evidence-first 的 AI 新闻研究 Agent：采集 RSS/Bing 新闻，提取完整正文，跨来源聚类事件，生成 claim-level Fact Pack，在引用审计与自动修复通过后才更新趋势记忆。
 
----
+NewsWeaver 的核心不是“让 LLM 总结几篇文章”，而是维护一条可追踪的证据链：
+
+```text
+source → article → event → atomic claim → citation → report sentence → memory
+```
+
+当前版本：`1.3.0`（Beta）。项目同时提供 CLI、本地 Web 工作台、定时任务、多格式导出和固定评估脚本。
+
+## 工作流
+
+```mermaid
+flowchart LR
+    Input["Input: topic + sources"] --> Collect["Collect"]
+    Collect --> Extract["Extract full text"]
+    Extract --> Rank["Rank + diversify"]
+    Rank --> Cluster["Event clustering"]
+    Cluster --> Facts["Claim-level Fact Pack"]
+    Facts --> Generate["Generate"]
+    Generate --> Audit{"Citation audit"}
+    Audit -- "failed, max 2" --> Repair["Repair"]
+    Repair --> Audit
+    Audit -- "pass / repaired" --> Save["Markdown / HTML / Web review"]
+    Audit -- "needs_review" --> Draft["Save draft only"]
+    Save --> Memory["Claim lifecycle memory"]
+    Draft -. "blocked" .-> Memory
+```
+
+生成闭环严格遵循：
+
+```text
+ingest
+→ extract
+→ rank/select
+→ cluster events
+→ extract atomic facts
+→ generate
+→ audit
+→ repair (最多 2 次)
+→ final audit
+→ save
+→ update memory（仅 audit pass）
+```
+
+## 主要能力
+
+| 能力 | 当前实现 |
+|---|---|
+| Claim-level evidence | 一篇文章拆成多条 atomic claims；每条保留 `source_span` 与完整 provenance |
+| 跨来源事件融合 | 基于标题/正文关键词、实体重叠和发布时间的确定性聚类；不使用媒体名作为 cluster key |
+| 多来源佐证 | 同一事件中的相似 claims 会记录 `corroborating_sources` 并调整置信度 |
+| 可验证生成 | 关键事实、数字、日期、金额、比例和直接归因必须引用 `[Fxxx]` |
+| 引用闭环 | 校验 ID、缺失引用、citation/claim 支持关系、Fact Pack 外事实和高风险信息 |
+| 安全记忆 | `needs_review` 草稿不会写入趋势记忆；通过审计的 claims 才能进入 lifecycle |
+| Claim lifecycle | `new → corroborated / disputed / superseded / fulfilled / expired` |
+| 信息覆盖排序 | BM25-style relevance × freshness × source quality × novelty，并加入事件/来源 diversity |
+| 稳健正文提取 | 完整正文缓存、canonical URL、超时重试、并发抓取、readability/selector/body fallback、域名 adapter |
+| 可复现评估 | 固定 fixture 衡量 citation、unsupported claims、event duplication、recall、diversity、extraction、cost 等 |
 
 ## 快速开始
 
+要求 Python 3.10+。
+
 ```bash
-# 1. 安装
-pip install -e .
-
-# 2. 配置 LLM（创建 .env 文件，填入你的 API Key）
-#    Windows:
-echo NEWSWEAVER_LLM_API_KEY=sk-xxx > .env
-echo NEWSWEAVER_LLM_BASE_URL=https://api.deepseek.com/v1 >> .env
-echo NEWSWEAVER_LLM_MODEL=deepseek-chat >> .env
-#    macOS/Linux:
-#    cat > .env << 'EOF'
-#    NEWSWEAVER_LLM_API_KEY=sk-xxx
-#    NEWSWEAVER_LLM_BASE_URL=https://api.deepseek.com/v1
-#    NEWSWEAVER_LLM_MODEL=deepseek-chat
-#    EOF
-
-# 3. 启动交互式模式
-newsweaver interactive
+git clone https://github.com/YinL04/NewsWeaver.git
+cd NewsWeaver
+pip install .
 ```
 
-Windows 也可以直接启动 Web 工作台：
+复制环境变量模板并填写 OpenAI-compatible API：
 
-```powershell
+```bash
+# macOS / Linux
+cp .env.example .env
+
+# Windows PowerShell
 Copy-Item .env.example .env
-# 编辑 .env，填入 NEWSWEAVER_LLM_API_KEY
-.\run-web.ps1
 ```
 
-或者直接用命令：
-
-```bash
-newsweaver topic add --name "AI" --keywords "大模型,GPT,LLM"
-newsweaver generate --topic "AI"
+```env
+NEWSWEAVER_LLM_API_KEY=sk-your-api-key
+NEWSWEAVER_LLM_BASE_URL=https://api.openai.com/v1
+NEWSWEAVER_LLM_MODEL=gpt-4o-mini
 ```
 
-生成的报道在 `output/AI_<日期>.md`。
-
----
-
-## 用户工作台与可信生成
-
-### v1.2 Beta：真实链路准备度
-
-Web 工作台新增“真实链路准备度”面板，会在启动后检查：
-
-- Python 版本与关键依赖
-- LLM API Key、模型和 Base URL
-- 是否已经创建主题
-- `output/` 是否可写
-- 错误日志位置
-
-后端同时提供健康检查接口：
-
-```bash
-curl http://127.0.0.1:8765/api/health
-```
-
-如果采集、生成或改写失败，异常会写入本地日志：
-
-```text
-~/.newsweaver/logs/newsweaver.log
-```
-
-素材体检现在会给出红黄绿状态：
-
-- 绿灯：文章数、来源数、正文覆盖率都达标，可以直接生成
-- 黄灯：可以生成，但建议人工复核
-- 红灯：素材不足，需要放宽关键词、增加信源或提高采集数量
-
-主题创建页也做了首次启动优化：新用户只需要填写主题名和关键词；排除词、必须包含词、信源、受众、风格、篇幅都收进“高级筛选和写作偏好”。
-
-### 本地 Web 简易上手台
-
-```bash
-newsweaver web
-```
-
-默认打开 `http://127.0.0.1:8765`。页面会按三步引导使用：
-
-1. 连接模型：只填 API Key，高级设置可先不管。
-2. 选择方向：从“AI 大模型 / 芯片半导体 / 互联网公司 / 新能源车 / 出海公司”等模板一键创建主题。
-3. 生成报告：先体检素材质量，再生成报告并查看历史报告。
-
-### 生成前检查
+先检查真实链路：
 
 ```bash
 newsweaver doctor
 ```
 
-用于检查 Python 版本、依赖包、LLM 配置、主题数量和输出目录权限。
-
-### 生成前预览
+### Web 工作台
 
 ```bash
+newsweaver web
+```
+
+默认地址是 `http://127.0.0.1:8765`。Windows 也可以运行：
+
+```powershell
+.\run-web.ps1
+```
+
+Web 工作台提供：
+
+- 模型与环境健康检查；
+- 主题模板、关键词、必须包含词、自定义 RSS 和写作偏好；
+- 素材体检、正文提取状态、质量门禁；
+- 报告、证据侧栏、`source_span`、引用审计状态；
+- `pass`、`repaired`、`needs_review` 三种结果；
+- Markdown 编辑、版本保存/恢复和受 Fact Pack 约束的局部改写；
+- claim lifecycle 趋势卡片。
+
+### CLI
+
+```bash
+# 创建主题
+newsweaver topic add --name "AI" --keywords "大模型,GPT,LLM" --sources "rss"
+
+# 生成前预览（不调用 LLM）
 newsweaver preview --topic "AI" --limit 10 --save
-```
 
-预览会展示采集文章、相关性分数、来源数量和质量评分；加上 `--save` 会把预览保存到 `output/preview/`。
+# 生成报告
+newsweaver generate --topic "AI"
 
-Web 工作台的素材体检会进一步提取正文，并在生成时复用同一批证据。若文章数、独立来源数或正文覆盖率未达到门槛，系统会要求人工确认后才能继续。
-
-### 可信度侧边文件
-
-每次运行 `newsweaver generate` 后，除了 Markdown 报告，还会生成三类侧边文件：
-
-- `.facts.json`：事实证据包，记录每条事实对应的来源文章和 URL
-- `.quality.json`：质量评分，包括文章数、来源数、正文提取覆盖率和风险提示
-- `.clusters.json`：轻量事件聚类，辅助判断报道素材是否过于集中
-- `.audit.json`：引用审计结果，包括证据覆盖率、无效编号和未标注证据的数字陈述
-
-### 报告工作台
-
-Web 端支持 Markdown 阅读、证据侧栏、全文编辑、版本化保存、历史版本恢复和按章节局部改写。主题还可配置必须包含词、自定义 RSS、目标受众、写作风格和篇幅；趋势页会展示热点、反复玩家、周期变化和拐点信号。
-
-### 趋势记忆与 Agent 闭环
-
-每次生成后，NewsWeaver 会把本期内容写入结构化记忆：
-
-- 事件：本期发生了什么
-- 实体：反复出现的公司、产品、人物和机构
-- 指标：金额、比例、数量、Token 等可追踪数据
-- 判断：基于证据的阶段性结论
-
-查看趋势卡片：
-
-```bash
+# 查看趋势与 claim 状态变化
 newsweaver trend --topic "AI"
-```
 
-生成报告时，Prompt 会自动加入历史趋势，并要求报告包含“本期和过去相比变化了什么”。
-
-### 订阅模板
-
-```bash
-newsweaver template list
-newsweaver template add ai
-newsweaver template add chip
-newsweaver template add ev
-newsweaver template add global
-newsweaver template add fintech
-```
-
-内置模板覆盖 AI、芯片、新能源、出海、金融科技等方向。
-
-### 定时任务
-
-```bash
-# 每天 09:00 自动生成
-newsweaver schedule add --topic "AI" --cadence daily --time 09:00
-
-# 查看任务
-newsweaver schedule list
-
-# 只检查并运行一次到期任务
-newsweaver schedule run --once
-
-# 常驻调度器
-newsweaver schedule run --interval 300
-```
-
-调度配置保存在 `~/.newsweaver/schedule.json`。
-
-### 多格式输出与半自动发布
-
-每次生成报告会同时输出：
-
-- `.md`：Markdown 正文
-- `.html`：可阅读 HTML
-- `.wechat.md`：公众号草稿
-- `.email.md`：邮件摘要
-- `.publish.json`：标题候选、社媒摘要、封面图 prompt
-
-查看发布素材：
-
-```bash
-newsweaver publish --topic "AI" --platform linkedin --kit
-```
-
----
-
-## 目录
-
-- [特性](#特性)
-- [架构概览](#架构概览)
-- [安装](#安装)
-- [配置](#配置)
-- [使用](#使用)
-- [核心模块](#核心模块)
-- [三层记忆机制](#三层记忆机制)
-- [数据源](#数据源)
-- [项目结构](#项目结构)
-- [技术栈](#技术栈)
-- [文件存储](#文件存储)
-- [开发](#开发)
-
----
-
-## 特性
-
-| 特性 | 说明 |
-|------|------|
-| **RSS 优先** | 预置 36氪、虎嗅、IT之家、少数派、InfoQ、爱范儿等中文科技媒体 RSS 源，中国大陆直接可用 |
-| **LLM 兼容** | 支持 OpenAI / DeepSeek / Qwen 等 OpenAI 兼容 API，`base_url` 可配置 |
-| **三层记忆** | L1 瞬时(内存) / L2 近期(7天) / L3 长期(90天) 记忆机制，自动对比历史趋势 |
-| **自媒体风格** | 内置 `skill.md` 写作指南，生成有深度、有观点的完整报道，不是简单摘要 |
-| **零基础设施** | 纯 JSON 文件存储，无需数据库，开箱即用 |
-| **交互式 CLI** | 支持菜单式交互操作，无需记忆命令参数 |
-| **跨平台** | Windows / macOS / Linux 完整支持 |
-
----
-
-## 架构概览
-
-### 系统架构
-
-```mermaid
-flowchart TB
-  subgraph UI["用户入口"]
-    Web["Web 工作台"]
-    CLI["CLI / 定时任务"]
-  end
-
-  subgraph Core["NewsWeaver 核心能力"]
-    Topic["主题管理"]
-    Config["配置与健康检查"]
-    Fetch["采集层"]
-    Pipeline["素材处理与质量门禁"]
-    Prompt["Prompt 构造"]
-    LLM["OpenAI 兼容 LLM"]
-    Memory["趋势记忆 L2 / L3"]
-    Audit["引用审计"]
-    Publish["发布素材包"]
-  end
-
-  subgraph Sources["外部数据源"]
-    RSS["RSS 源"]
-    Bing["Bing News 可选"]
-    CustomRSS["自定义 RSS"]
-  end
-
-  subgraph Files["本地文件产物"]
-    ConfigFile["~/.newsweaver/config.json"]
-    MemoryFile["~/.newsweaver/memory/*.json"]
-    Output["output/*.md / *.html"]
-    Sidecars[".facts / .quality / .audit / .publish"]
-  end
-
-  Web --> Topic
-  Web --> Config
-  Web --> Pipeline
-  Web --> Audit
-  CLI --> Topic
-  CLI --> Fetch
-  CLI --> Prompt
-
-  Topic --> ConfigFile
-  Config --> ConfigFile
-  Fetch --> RSS
-  Fetch --> Bing
-  Fetch --> CustomRSS
-  RSS --> Pipeline
-  Bing --> Pipeline
-  CustomRSS --> Pipeline
-  Pipeline --> Prompt
-  Memory --> Prompt
-  Prompt --> LLM
-  LLM --> Output
-  Pipeline --> Sidecars
-  Output --> Audit
-  Audit --> Sidecars
-  Output --> Publish
-  Publish --> Sidecars
-  Memory --> MemoryFile
-  LLM --> Memory
-```
-
-### 核心流程
-
-```mermaid
-sequenceDiagram
-  actor User as 用户
-  participant Web as Web / CLI
-  participant Fetch as RSS / Bing 采集
-  participant Pipe as 素材处理流水线
-  participant Mem as 趋势记忆
-  participant LLM as LLM
-  participant Out as 输出文件
-  participant Audit as 引用审计
-
-  User->>Web: 选择主题并发起生成
-  Web->>Fetch: 按关键词、排除词、信源采集
-  Fetch-->>Pipe: 返回候选文章
-  Pipe->>Pipe: 正文提取、去重、排序、质量评分
-  Pipe-->>Web: 返回素材体检结果
-  Web->>Mem: 读取 L2 / L3 趋势记忆
-  Mem-->>Web: 返回历史趋势上下文
-  Web->>LLM: 提交事实包、趋势、写作指南
-  LLM-->>Web: 返回 Markdown 报告
-  Web->>Out: 写入 .md / .html / 发布素材包
-  Web->>Audit: 检查 [F001] 引用和数字陈述
-  Audit->>Out: 写入 .audit.json
-  Web->>Mem: 追加本期结构化记忆
-```
-
-### 可信生成全链路流程图
-
-```mermaid
-flowchart TD
-  Start(["开始"])
-  Health["环境健康检查<br/>依赖 / API Key / 输出目录 / 主题"]
-  Topic["选择或创建主题"]
-  Preview["素材体检<br/>采集 RSS / Bing / 自定义源"]
-  Extract["正文提取与去重排序"]
-  Quality{"质量门禁<br/>文章数 / 来源数 / 正文覆盖率"}
-  Confirm{"是否强制继续？"}
-  Facts["构建事实证据包<br/>F001 / F002 / ..."]
-  Memory["读取趋势记忆<br/>近期 L2 + 长期 L3"]
-  Prompt["构造 Prompt<br/>事实 + 趋势 + 写作偏好"]
-  Generate["调用 LLM 生成报告"]
-  Save["保存 Markdown / HTML / WeChat / Email"]
-  Audit{"引用审计通过？"}
-  Workbench["报告工作台<br/>证据侧栏 / 编辑 / 版本恢复 / 局部改写"]
-  Publish["生成发布素材包<br/>标题 / 摘要 / 封面 Prompt"]
-  End(["完成"])
-  Stop(["暂停并提示用户修正"])
-
-  Start --> Health --> Topic --> Preview --> Extract --> Quality
-  Quality -- "绿灯 / 黄灯" --> Facts
-  Quality -- "红灯" --> Confirm
-  Confirm -- "是" --> Facts
-  Confirm -- "否" --> Stop
-  Facts --> Memory --> Prompt --> Generate --> Save --> Audit
-  Audit -- "是" --> Publish --> End
-  Audit -- "否" --> Workbench --> Audit
-```
-
----
-
-## 安装
-
-### 环境要求
-
-- Python >= 3.10
-- pip
-
-### 安装步骤
-
-```bash
-# 克隆项目
-git clone <repo-url>
-cd newsweaver
-
-# 安装（开发模式）
-pip install -e .
-
-# 验证安装
-newsweaver --version
-# 输出: newsweaver, version 1.0.0
-```
-
-### 依赖说明
-
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| `click` | >= 8.0 | CLI 框架，支持命令组、参数验证 |
-| `requests` | >= 2.28 | HTTP 请求，RSS/Bing API 调用 |
-| `feedparser` | >= 6.0 | RSS/Atom 源解析 |
-| `beautifulsoup4` | >= 4.12 | HTML 解析与正文提取 |
-| `lxml` | >= 4.9 | HTML/XML 解析引擎 |
-| `readability-lxml` | >= 0.8 | 基于 Mozilla Readability 的正文提取 |
-| `openai` | >= 1.0 | OpenAI 兼容 API 调用 |
-
----
-
-## 配置
-
-### 方式一：.env 文件（推荐）
-
-复制 `.env.example` 为 `.env`，填入你的配置：
-
-```bash
-cp .env.example .env
-```
-
-```env
-# LLM 配置（必填）
-NEWSWEAVER_LLM_API_KEY=sk-your-api-key-here
-NEWSWEAVER_LLM_BASE_URL=https://api.openai.com/v1
-NEWSWEAVER_LLM_MODEL=gpt-4o-mini
-
-# 可选：Bing News Search API
-# NEWSWEAVER_BING_API_KEY=your-bing-api-key
-```
-
-### 方式二：CLI 命令
-
-```bash
-newsweaver config set --key llm.api_key --value sk-xxx
-newsweaver config set --key llm.base_url --value https://api.deepseek.com/v1
-newsweaver config set --key llm.model --value deepseek-chat
-```
-
-### 配置优先级
-
-```
-环境变量 (.env) > 配置文件 (~/.newsweaver/config.json) > 默认值
-```
-
-### 支持的 LLM 服务
-
-| 服务 | base_url | 推荐 model | 说明 |
-|------|----------|------------|------|
-| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` | 官方 API |
-| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` | 国内推荐，性价比高 |
-| Qwen (通义千问) | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-turbo` | 阿里云服务 |
-| Moonshot | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` | 月之暗面 |
-| GLM (智谱) | `https://open.bigmodel.cn/api/paas/v4` | `glm-4-flash` | 智谱 AI |
-
-### 环境变量列表
-
-| 变量名 | 说明 | 必填 |
-|--------|------|------|
-| `NEWSWEAVER_LLM_API_KEY` | LLM API 密钥 | 是 |
-| `NEWSWEAVER_LLM_BASE_URL` | API 端点地址 | 否 |
-| `NEWSWEAVER_LLM_MODEL` | 默认模型 | 否 |
-| `NEWSWEAVER_BING_API_KEY` | Bing News API 密钥 | 否 |
-
----
-
-## 使用
-
-### 交互式模式（推荐新手）
-
-```bash
+# 启动引导式菜单
 newsweaver interactive
 ```
 
-```
-==================================================
-  NewsWeaver 交互式模式
-==================================================
+## Fact Pack 示例
 
---------------------------------------------------
-请选择操作：
-  1. 查看已有主题
-  2. 添加新主题
-  3. 删除主题
-  4. 采集新闻（fetch）
-  5. 生成报道（generate）
-  6. 查看记忆
-  7. 压缩记忆
-  8. 发布报道
-  0. 退出
-```
-
-### 命令行模式
-
-#### 主题管理
-
-```bash
-# 添加主题
-newsweaver topic add --name "AI" --keywords "大模型,GPT,LLM" --lang zh
-
-# 添加主题（带排除词）
-newsweaver topic add --name "芯片" --keywords "NVIDIA,AMD,芯片" --exclude "游戏,显卡"
-
-# 查看主题
-newsweaver topic list
-
-# 删除主题（含关联记忆）
-newsweaver topic remove --name "AI"
-```
-
-#### 新闻采集
-
-```bash
-# 采集新闻（调试用，保存原始数据）
-newsweaver fetch --topic "AI" --limit 5 --days 3
-
-# 输出示例：
-# >>> 正在搜索 "AI" 相关新闻...
-# >>> RSS: 找到 5 篇
-# >>> 正文提取: 共 5 篇
-# >>> 已保存至 output/raw/AI_20260608_103000.json
-```
-
-#### 生成报道
-
-```bash
-# 使用默认模型生成
-newsweaver generate --topic "AI"
-
-# 指定模型生成
-newsweaver generate --topic "AI" --model deepseek-chat --limit 10
-
-# 输出示例：
-# >>> 正在搜索 "AI" 相关新闻...
-# >>> 找到 8 篇文章
-# >>> 正文提取: 共 8 篇
-# >>> 读取记忆...
-# >>> L2 (2 条记录)，L3 (3 周数据)
-# >>> 调用 LLM (deepseek-chat) 生成报道...
-# >>> 报道生成完成
-# >>> 报道已保存至 output/AI_2026-06-08.md
-```
-
-#### 记忆管理
-
-```bash
-# 查看记忆
-newsweaver memory show --topic "AI"
-#   [L2 近期记忆] 2 条记录
-#     2026-06-07 | 情感: 0.85 | 实体: NVIDIA, AMD
-#     2026-06-06 | 情感: 0.72 | 实体: Intel, TSMC
-#   [L3 长期趋势] 3 周
-#     2026-06-01 | 12 篇 | 均情感: 0.72 | 实体: NVIDIA, AMD, Intel
-
-# 手动压缩记忆（L2 → L3）
-newsweaver memory compact --topic "AI"
-```
-
-#### 发布
-
-```bash
-# 模拟发布到社交平台
-newsweaver publish --topic "AI" --platform twitter
-newsweaver publish --topic "AI" --platform linkedin
-newsweaver publish --topic "AI" --platform mastodon
-```
-
-#### 全局参数
-
-| 参数 | 缩写 | 说明 |
-|------|------|------|
-| `--verbose` | `-v` | 开启 DEBUG 日志输出 |
-| `--config` | `-c` | 指定配置文件路径 |
-| `--help` | `-h` | 显示帮助信息 |
-| `--version` | - | 显示版本号 |
-
----
-
-## 核心模块
-
-### 模块依赖关系
-
-```
-cli.py ─────────────────────────────────────────────────┐
-  │                                                     │
-  ├── topic.py (主题管理)                               │
-  │     └── config.py                                   │
-  │                                                     │
-  ├── commands.py (命令定义) ────────────────────────────┤
-  │     ├── config.py (配置读写)                        │
-  │     ├── fetcher/rss.py (RSS 采集)                   │
-  │     ├── fetcher/bing.py (Bing 采集)                 │
-  │     ├── extractor.py (正文提取)                     │
-  │     ├── generator.py (生成编排) ─────────────────────┤
-  │     │     ├── llm/client.py (LLM 调用)              │
-  │     │     ├── llm/prompts.py (Prompt 模板)          │
-  │     │     └── memory/store.py (记忆读写)            │
-  │     ├── memory/compact.py (记忆压缩)                │
-  │     └── publisher.py (发布接口)                     │
-  │                                                     │
-  └── utils.py (工具函数)                               │
-```
-
-### 关键模块说明
-
-| 模块 | 文件 | 职责 |
-|------|------|------|
-| CLI 入口 | `cli.py` | click 命令组注册，Windows UTF-8 支持 |
-| 配置管理 | `config.py` | 读写 `~/.newsweaver/config.json`，支持 `.env` 环境变量覆盖 |
-| 主题管理 | `topic.py` | `topic add/list/remove` 命令实现 |
-| 命令定义 | `commands.py` | `config/fetch/generate/memory/publish/interactive` 命令实现 |
-| RSS 适配器 | `fetcher/rss.py` | 使用 feedparser 解析 RSS 源，支持预置源和自定义源 |
-| Bing 适配器 | `fetcher/bing.py` | Bing News Search API 调用（可选） |
-| 正文提取 | `extractor.py` | readability-lxml + BeautifulSoup 双引擎提取 |
-| LLM 客户端 | `llm/client.py` | OpenAI SDK 封装，含自动重试（最多 2 次，间隔 3s） |
-| Prompt 模板 | `llm/prompts.py` | 加载 `skill.md` 写作指南，构造 System/User Prompt |
-| 生成编排 | `generator.py` | 完整流程：fetch → 记忆 → LLM → 输出 → 更新记忆 |
-| 记忆存储 | `memory/store.py` | L2/L3 JSON 读写，原子写入，自动清理过期数据 |
-| 记忆压缩 | `memory/compact.py` | L2 → L3 按周聚合，统计高频实体和平均情感 |
-| 发布接口 | `publisher.py` | 预留接口，当前为模拟实现 |
-| 工具函数 | `utils.py` | 文件锁、日志配置、原子写入、文本截断 |
-
----
-
-## 三层记忆机制
-
-### 记忆层级
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    L1 瞬时工作记忆                        │
-│              (内存变量，单次运行即销毁)                    │
-└─────────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────┐
-│                 L2 近期情景记忆                           │
-│         ~/.newsweaver/memory/<topic>.json                │
-│              recent[] - 7 天滚动窗口                      │
-│                    最多 30 条记录                          │
-└─────────────────────────────────────────────────────────┘
-                            │
-                     memory compact
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────┐
-│                 L3 长期趋势记忆                           │
-│         ~/.newsweaver/memory/<topic>.json                │
-│             long_term[] - 90 天按周聚合                    │
-│                    最多 52 周记录                          │
-└─────────────────────────────────────────────────────────┘
-```
-
-### L2 数据结构
+Fact Pack schema v2 保留旧字段 `id` 和 `source_title`，同时加入 claim-level 字段：
 
 ```json
 {
-  "date": "2026-06-07",
-  "summary": "OpenAI 发布 GPT-5，多模态能力大幅提升，行业反响热烈。",
-  "sentiment": 0.85,
-  "top_entities": ["OpenAI", "GPT-5", "Sam Altman"]
+  "schema_version": 2,
+  "fact_id": "F001",
+  "id": "F001",
+  "claim": "Company X announced Product Y on August 10.",
+  "article_id": "A12AB34CD56EF",
+  "source": "Reuters",
+  "source_title": "Company X launches Product Y",
+  "url": "https://example.com/story",
+  "published_at": "2026-08-10T08:00:00+00:00",
+  "source_span": "Company X announced Product Y on August 10.",
+  "confidence": 0.9,
+  "corroborating_sources": ["BBC"],
+  "event_id": "E89ABCDEF0123"
 }
 ```
 
-### L3 数据结构
+`event_id` 与 `article_id` 都由内容/provenance 确定性生成。同一输入即使顺序变化，ID 仍然一致；cluster 成员变化时，事件内容哈希也会变化。
+
+## 报告与审计示例
+
+下面是格式示例，不是 benchmark 或真实新闻声明：
+
+```markdown
+Company X 在 8 月 10 日发布了 Product Y。[F001][F002]
+
+这说明该公司正在加快产品节奏——这是分析判断，不是新增事实。
+```
+
+审计 sidecar 是结构化 JSON：
 
 ```json
 {
-  "week_start": "2026-06-01",
-  "article_count": 12,
-  "avg_sentiment": 0.72,
-  "top_entities": ["OpenAI", "Google", "Anthropic"]
+  "schema_version": 2,
+  "status": "repaired",
+  "passed": true,
+  "repair_attempts": 1,
+  "checks": {
+    "citation_ids_exist": {"passed": true, "count": 0, "items": []},
+    "key_claims_cited": {"passed": true, "count": 0, "items": []},
+    "citations_support_claims": {"passed": true, "count": 0, "items": []},
+    "fact_pack_only": {"passed": true, "count": 0, "items": []},
+    "high_risk_evidence": {"passed": true, "count": 0, "items": []}
+  },
+  "failure_reasons": []
 }
 ```
 
-### 更新逻辑
+如果两次 repair 后仍失败，报告仍会保存为 draft，但状态为 `needs_review`，且不会调用记忆更新。
 
-| 触发时机 | 操作 |
-|----------|------|
-| 每次 `generate` 完成后 | LLM 提取摘要 + 情感分数 → 追加至 L2；清理 >7 天记录 |
-| 手动 `memory compact` | L2 按周聚合 → 写入 L3；清除已压缩的 L2 条目 |
-| L3 超出 52 周 | 自动淘汰最早一周 |
+## 事件聚类
 
----
+默认 `DeterministicEventClusterer` 使用：
 
-## 数据源
-
-### 预置 RSS 源
-
-| 源名称 | RSS 地址 | 类型 |
-|--------|----------|------|
-| 36氪 | `https://36kr.com/feed` | 科技商业 |
-| 虎嗅 | `https://www.huxiu.com/rss/0.xml` | 科技商业 |
-| IT之家 | `https://www.ithome.com/rss/` | 科技资讯 |
-| 少数派 | `https://sspai.com/feed` | 效率工具 |
-| InfoQ | `https://www.infoq.cn/feed` | 技术社区 |
-| 爱范儿 | `https://www.ifanr.com/feed` | 消费科技 |
-
-### 自定义 RSS 源
-
-```bash
-# 添加自定义 RSS 源
-newsweaver topic add --name "自定义" --keywords "关键词" --sources "rss:https://example.com/rss"
+```text
+title token Jaccard
++ content keyword overlap
++ named-entity overlap
++ publication-time proximity
 ```
 
-### 信源优先级
+cluster 记录：
 
-```
-1. 预置 RSS 源（默认启用）
-2. 用户自定义 RSS 源
-3. Bing News Search API（需配置 API Key）
-```
+- 稳定的 `event_id`；
+- 完整 article provenance；
+- 来源列表与实体列表；
+- 发布时间范围；
+- representative title；
+- 兼容旧格式的 `cluster` 与 `titles` 字段。
 
----
+`EventClusterer` 是可替换接口，未来可以接入 embedding clustering，而无需修改 Fact Pack 和生成调用链。
 
-## 项目结构
+## 排序与正文提取
 
-```
-NewsWeaver/
-├── pyproject.toml              # 项目元数据与依赖声明
-├── .env.example                # 环境变量模板
-├── .gitignore                  # Git 忽略规则
-├── README.md                   # 项目文档
-├── skill.md                    # LLM 新闻写作指南
-│
-├── src/
-│   └── newsweaver/
-│       ├── __init__.py         # 版本号
-│       ├── cli.py              # CLI 入口（click 命令组）
-│       ├── config.py           # 配置管理（读写 config.json + .env）
-│       ├── topic.py            # 主题管理命令
-│       ├── commands.py         # CLI 命令定义
-│       ├── generator.py        # 新闻生成主流程编排
-│       ├── extractor.py        # 正文提取（readability + BS4）
-│       ├── publisher.py        # 社交媒体发布接口（预留）
-│       ├── utils.py            # 工具函数（文件锁、日志、原子写入）
-│       │
-│       ├── fetcher/
-│       │   ├── __init__.py
-│       │   ├── base.py         # 信源抽象基类 + Article dataclass
-│       │   ├── rss.py          # RSS 适配器（feedparser）
-│       │   └── bing.py         # Bing News Search 适配器
-│       │
-│       ├── llm/
-│       │   ├── __init__.py
-│       │   ├── client.py       # OpenAI API 封装（含重试）
-│       │   └── prompts.py      # Prompt 模板（加载 skill.md）
-│       │
-│       └── memory/
-│           ├── __init__.py
-│           ├── store.py        # 记忆存储引擎（L2/L3 JSON）
-│           └── compact.py      # 记忆压缩（L2 → L3 聚合）
-│
-├── output/                     # 生成的新闻报道
-│   ├── <topic>_<date>.md       # 最终报道
-│   └── raw/                    # 原始采集数据（调试用）
-│       └── <topic>_<timestamp>.json
-│
-└── tests/                      # 测试文件
+排序采用可替换的 `RankingStrategy`：
+
+```text
+final_score = relevance × freshness × source_quality × novelty × diversity
 ```
 
----
+每篇文章的分项分数写入 `article.metadata["ranking"]`。最终贪心选择会降低同一事件和同一来源反复出现的权重，以有限文章覆盖更多独立信息。
 
-## 技术栈
-
-| 层级 | 技术 | 说明 |
-|------|------|------|
-| 运行环境 | Python >= 3.10 | 使用 `match/case` 等新语法 |
-| CLI 框架 | click >= 8.0 | 命令组、参数验证、自动补全 |
-| HTTP 请求 | requests >= 2.28 | RSS/API 调用，15s 超时 |
-| RSS 解析 | feedparser >= 6.0 | RSS/Atom 源解析 |
-| 正文提取 | readability-lxml + BeautifulSoup4 | 双引擎，readability 优先，BS4 兜底 |
-| LLM 调用 | openai SDK >= 1.0 | OpenAI 兼容范式，base_url 可配置 |
-| 存储 | JSON 文件 | 原子写入（write → rename），无外部依赖 |
-| 配置 | JSON + .env | 环境变量优先级高于配置文件 |
-
----
-
-## 文件存储
-
-### 配置文件
-
-**路径**: `~/.newsweaver/config.json`
+正文提取通过 `extract_article_detailed()` 返回：
 
 ```json
 {
-  "config_version": 1,
-  "llm": {
-    "api_key": "",
-    "base_url": "https://api.openai.com/v1",
-    "model": "gpt-4o-mini"
-  },
-  "search": {
-    "bing_api_key": "",
-    "default_limit": 10,
-    "days_back": 1
-  },
-  "topics": [
-    {
-      "name": "AI",
-      "keywords": ["大模型", "GPT", "LLM"],
-      "exclude_words": [],
-      "sources": [],
-      "language": "zh"
-    }
+  "status": "success",
+  "method": "readability",
+  "content_length": 8321,
+  "cached": true,
+  "canonical_url": "https://example.com/canonical",
+  "attempts": 1
+}
+```
+
+`extract_article(url) -> str` 仍然保留。完整正文写入本地 HTTP/extraction cache，不再固定截断为 2000 字；进入 LLM Prompt 时，Fact Pack 会按预算优先选择高风险信息并轮询不同事件。
+
+## 趋势记忆
+
+记忆文件位于 `~/.newsweaver/memory/<topic>.json`，schema v3 保留 events/entities/metrics/judgments，并新增 claims：
+
+```json
+{
+  "claim_id": "C12AB34CD56EF",
+  "claim": "Company X plans to launch Product Y in Q4.",
+  "status": "fulfilled",
+  "relationships": [
+    {"type": "fulfills", "claim_id": "C98FE76DC54BA"}
   ]
 }
 ```
 
-### 记忆文件
+趋势 API/CLI 可以回答：What is new、What was confirmed、What was contradicted、What prediction was fulfilled，以及哪些信息已经 superseded/expired。
 
-**路径**: `~/.newsweaver/memory/<topic>.json`
+## 输出文件
 
-```json
-{
-  "topic": "AI",
-  "created_at": "2026-06-01T00:00:00Z",
-  "updated_at": "2026-06-08T12:00:00Z",
-  "recent": [...],
-  "long_term": [...]
-}
-```
+一次成功生成会在 `output/` 创建：
 
-### 输出文件
+| 文件 | 内容 |
+|---|---|
+| `<topic>_<date>.md` | 报告或待复核 draft |
+| `.html` | HTML 报告 |
+| `.facts.json` | Claim-level Fact Pack |
+| `.clusters.json` | 跨来源事件聚类 |
+| `.quality.json` | 生成前素材质量门禁 |
+| `.audit.json` | 审计、repair 次数和失败原因 |
+| `.wechat.md` / `.email.md` | 渠道草稿 |
+| `.publish.json` | 标题、摘要和封面 prompt 素材包 |
 
-- **报道**: `output/<topic>_<YYYY-MM-DD>.md`
-- **原始数据**: `output/raw/<topic>_<timestamp>.json`
+## 配置
 
----
+配置优先级：`.env` 环境变量 > `~/.newsweaver/config.json` > 默认值。
 
-## 开发
+| 环境变量 | 说明 |
+|---|---|
+| `NEWSWEAVER_LLM_API_KEY` | OpenAI-compatible API Key |
+| `NEWSWEAVER_LLM_BASE_URL` | API Base URL |
+| `NEWSWEAVER_LLM_MODEL` | 默认模型 |
+| `NEWSWEAVER_BING_API_KEY` | 可选 Bing News API Key |
 
-### 本地开发
+主题支持 `keywords`、`exclude_words`、`required_words`、`sources`、`language` 和 `preferences`。信源可以是 `rss`、`bing` 或 `rss:https://example.com/feed.xml`。
+
+## 其他命令
 
 ```bash
-# 安装开发依赖
-pip install -e .
+newsweaver template list
+newsweaver template add ai
 
-# 运行
-newsweaver --help
+newsweaver fetch --topic "AI" --limit 10 --days 3
+newsweaver memory show --topic "AI"
+newsweaver memory compact --topic "AI" --force
 
-# 查看日志
-newsweaver -v fetch --topic "AI"
+newsweaver schedule add --topic "AI" --cadence daily --time 09:00
+newsweaver schedule run --once
+
+newsweaver publish --topic "AI" --platform linkedin --kit
 ```
 
-### 新增信源
+社交平台发布仍是模拟接口；`--kit` 只读取本地发布素材，不会发送外部内容。
 
-1. 在 `src/newsweaver/fetcher/` 下创建新适配器
-2. 继承 `BaseFetcher`，实现 `fetch()` 方法
-3. 在 `commands.py` 的 `fetch_cmd` 中注册
+## Eval 与开发
 
-### 自定义 Prompt
+安装开发依赖：
 
-编辑 `skill.md` 文件即可自定义 LLM 的写作风格和输出格式，无需修改代码。
+```bash
+pip install -e ".[dev]"
+```
+
+运行质量检查：
+
+```bash
+pytest
+ruff check .
+python -m build
+python scripts/evaluate.py
+```
+
+固定 fixture 位于 `tests/fixtures/eval/`。它是用于算法回归的合成样例，不代表真实世界质量或性能 benchmark。评估输出包括：
+
+- citation validity；
+- unsupported claim rate 与 claim coverage；
+- duplicate event rate 与 important event recall；
+- source diversity 与 trend consistency；
+- extraction success rate；
+- token usage、estimated generation cost 和 recorded latency。
+
+GitHub Actions 会在 Python 3.10 与 3.12 上运行 lint、test 和 build。
+
+## 项目结构
+
+```text
+src/newsweaver/
+├── cli.py / commands.py       # CLI 与命令调用链
+├── webapp.py / web/           # 本地 Web 工作台
+├── pipeline.py                # 向后兼容的公共流水线 API
+├── clustering.py              # EventClusterer 与确定性 baseline
+├── evidence.py                # Claim Fact Pack、audit、memory gate
+├── ranking.py                 # 模块化排序与 diversity
+├── extractor.py               # 完整正文、cache、adapter、metadata
+├── generator.py               # generate → audit → repair → save → memory
+├── evaluation.py              # 固定 eval 指标
+├── fetcher/                   # RSS / Bing adapters
+├── llm/                       # OpenAI-compatible client 与 prompts
+└── memory/                    # JSON store、claim lifecycle、周聚合
+
+scripts/evaluate.py
+tests/fixtures/eval/
+tests/
+```
+
+## 兼容性与限制
+
+- CLI 命令和 entry point 没有 breaking change。
+- Fact Pack v2 双写 `id`/`fact_id`，旧消费者可继续读取 `id`。
+- MemoryStore 会把加载后的记忆标记为 schema v3；旧 recent/long_term 条目无需一次性迁移，缺失 `claims` 时按空列表处理。
+- `add_structured_recent_memory()` 现在要求显式传入通过审计的结果；这是防止记忆污染的有意安全收紧。
+- 当前 citation support 是确定性的 lexical/entity/number baseline，不等同于 NLI；跨语言或高度抽象的改写可能被标记为 `needs_review`。
+- 当前事件聚类不使用向量数据库，复杂的跨日跟进事件可能分成多个 cluster。
+
+## License
+
+MIT
