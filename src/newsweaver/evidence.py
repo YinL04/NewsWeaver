@@ -152,17 +152,20 @@ def claim_support_score(statement: str, fact: dict) -> float:
 
 def audit_report(report: str, fact_pack: dict) -> dict:
     """Return a structured, deterministic evidence audit for a Markdown report."""
+    report_text = report if isinstance(report, str) else ""
     facts = fact_pack.get("facts", []) if isinstance(fact_pack, dict) else []
     by_id = {(fact.get("fact_id") or fact.get("id")): fact for fact in facts if fact.get("fact_id") or fact.get("id")}
     valid_ids = set(by_id)
-    all_cited = set(CITATION_RE.findall(report or ""))
+    all_cited = set(CITATION_RE.findall(report_text))
     invalid_ids = sorted(all_cited - valid_ids)
     cited_ids = sorted(all_cited & valid_ids)
     uncited_claims: list[str] = []
     unsupported_claims: list[dict] = []
     high_risk_without_evidence: list[str] = []
+    statements = _report_statements(report_text)
+    report_has_content = bool(statements)
 
-    for statement in _report_statements(report or ""):
+    for statement in statements:
         citations = CITATION_RE.findall(statement)
         factual = _is_key_factual_statement(statement)
         high_risk = bool(HIGH_RISK_RE.search(CITATION_RE.sub("", statement)))
@@ -192,6 +195,8 @@ def audit_report(report: str, fact_pack: dict) -> dict:
     high_risk_without_evidence = _dedupe(high_risk_without_evidence)[:20]
     unsupported_claims = unsupported_claims[:20]
     failure_reasons = []
+    if not report_has_content:
+        failure_reasons.append({"code": "empty_report", "message": "报告没有可审阅的正文内容", "items": []})
     if invalid_ids:
         failure_reasons.append({"code": "invalid_citation_id", "message": "存在 Fact Pack 中不存在的引用编号", "items": invalid_ids})
     if uncited_claims:
@@ -202,6 +207,7 @@ def audit_report(report: str, fact_pack: dict) -> dict:
         failure_reasons.append({"code": "high_risk_without_evidence", "message": "数字、日期或金额等高风险信息缺少有效证据", "items": high_risk_without_evidence})
 
     checks = {
+        "report_has_content": {"passed": report_has_content, "count": 0 if report_has_content else 1, "items": []},
         "citation_ids_exist": {"passed": not invalid_ids, "count": len(invalid_ids), "items": invalid_ids},
         "key_claims_cited": {"passed": not uncited_claims, "count": len(uncited_claims), "items": uncited_claims},
         "citations_support_claims": {"passed": not unsupported_claims, "count": len(unsupported_claims), "items": unsupported_claims},

@@ -108,6 +108,8 @@ def run_generate(
     report = llm.generate(SYSTEM_PROMPT, user_prompt, model=model)
     notify("audit", 88, "正在检查引用与数字陈述")
     report, audit = audit_and_repair_report(llm, report, fact_pack, model=model, max_repairs=2, progress=notify)
+    if not isinstance(report, str) or not report.strip():
+        raise RuntimeError("大模型未生成可保存的报告正文，请检查模型配置或稍后重试")
 
     # ── 4. 保存输出 ──
     today = datetime.now().strftime("%Y-%m-%d")
@@ -189,11 +191,14 @@ def audit_and_repair_report(
         repair_attempts += 1
         notify("repair", 88 + min(8, repair_attempts * 3), f"引用审计失败，正在自动修复 {repair_attempts}/{max_repairs}")
         try:
-            current = llm.generate(
+            candidate = llm.generate(
                 REPAIR_SYSTEM_PROMPT,
                 build_repair_prompt(current, fact_pack, audit),
                 model=model,
             )
+            if not isinstance(candidate, str) or not candidate.strip():
+                raise RuntimeError("大模型返回了空白修复结果")
+            current = candidate.strip()
         except Exception as exc:
             audit = dict(audit)
             failure = {

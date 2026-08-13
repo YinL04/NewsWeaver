@@ -72,6 +72,15 @@ class GenerationAuditTest(unittest.TestCase):
         self.assertEqual(audit["status"], "needs_review")
         self.assertTrue(any(reason["code"] == "repair_call_failed" for reason in audit["failure_reasons"]))
 
+    def test_empty_repair_does_not_erase_original_draft(self):
+        facts = build_fact_pack("AI", sample_articles()[:1])
+        original = "Unsupported revenue was 99 billion dollars."
+        report, audit = audit_and_repair_report(FakeLLM([""]), original, facts)
+
+        self.assertEqual(report, original)
+        self.assertEqual(audit["status"], "needs_review")
+        self.assertTrue(any(reason["code"] == "repair_call_failed" for reason in audit["failure_reasons"]))
+
     def test_failed_report_cannot_contaminate_trend_memory(self):
         class AlwaysBadClient:
             def __init__(self, *args, **kwargs):
@@ -100,6 +109,34 @@ class GenerationAuditTest(unittest.TestCase):
             audit = json.loads(output.with_suffix(".audit.json").read_text(encoding="utf-8"))
 
         self.assertEqual(audit["status"], "needs_review")
+        add_memory.assert_not_called()
+
+    def test_empty_generation_is_not_saved_as_a_report(self):
+        class EmptyClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def generate(self, *args, **kwargs):
+                return ""
+
+        class EmptyMemoryStore:
+            def __init__(self, _topic):
+                pass
+
+            def load(self):
+                return {"recent": [], "long_term": []}
+
+        config = {"llm": {"api_key": "test", "base_url": "https://example.com", "model": "test"}, "search": {}}
+        topic = {"name": "NoBlankArtifact", "keywords": ["Product Y"]}
+        with tempfile.TemporaryDirectory() as tmp, patch("newsweaver.generator.get_output_dir", return_value=Path(tmp)), patch(
+            "newsweaver.generator.LLMClient", EmptyClient
+        ), patch("newsweaver.generator.MemoryStore", EmptyMemoryStore), patch(
+            "newsweaver.generator.auto_compact_memory", return_value=0
+        ), patch("newsweaver.generator.add_structured_recent_memory") as add_memory:
+            with self.assertRaisesRegex(RuntimeError, "未生成可保存的报告正文"):
+                run_generate(config, topic, "test", 3, prepared_articles=sample_articles(), force=True)
+            self.assertEqual(list(Path(tmp).glob("*.md")), [])
+
         add_memory.assert_not_called()
 
     def test_passed_report_is_allowed_into_trend_memory(self):

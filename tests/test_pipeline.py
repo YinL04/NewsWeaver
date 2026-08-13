@@ -107,6 +107,19 @@ class PipelineTest(unittest.TestCase):
         self.assertFalse(unsupported["checks"]["citations_support_claims"]["passed"])
         self.assertFalse(uncited["checks"]["fact_pack_only"]["passed"])
 
+    def test_empty_report_fails_audit(self):
+        facts = build_fact_pack(
+            "AI",
+            [article("Product Y launch", "https://example.com/1", full_text="Company X announced Product Y.")],
+        )
+
+        for report in ("", "   \n", "# AI report\n\n## Sources"):
+            with self.subTest(report=report):
+                audit = audit_report(report, facts)
+                self.assertFalse(audit["passed"])
+                self.assertFalse(audit["checks"]["report_has_content"]["passed"])
+                self.assertIn("empty_report", [reason["code"] for reason in audit["failure_reasons"]])
+
     def test_same_source_different_events_do_not_cluster(self):
         articles = [
             article("Company X launches Product Y", "https://example.com/1", source="Reuters", summary="Company X unveiled Product Y."),
